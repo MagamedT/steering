@@ -6,8 +6,8 @@ Codebase for steering-vector experiments used in [Towards Understanding Steering
 
 This repository implements activation steering for causal LMs:
 
-1. Generate concept-positive and concept-negative prompt datasets.
-2. Compute per-layer steering vectors from activation mean differences.
+1. Generate concept-positive and concept-negative prompt datasets (`generate_prompts.py`).
+2. Compute per-layer steering vectors from activation mean differences (`generate_steering_vectors.py`).
 3. Sweep steering strength `alpha` and evaluate effects with:
    - next token probability curves (`generate_plot_data.py`),
    - concept presence probabilities judge scores (`generate_behavior.py`),
