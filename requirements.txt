@@ -1,0 +1,10 @@
+torchmonarch
+transformers
+accelerate
+datasets
+huggingface_hub
+scipy
+deepeval
+sentencepiece
+tiktoken
+matplotlib
