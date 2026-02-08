@@ -89,6 +89,8 @@ sbatch example_run.sh
 
 ### 1) Generate prompts
 
+This command builds concept-positive and concept-negative prompt JSONL files used to build the steering vectors.
+
 ```bash
 python generate_prompts.py \
   --model_generating_concept google/gemma-3-12b-it \
@@ -99,6 +101,8 @@ python generate_prompts.py \
 
 ### 2) Compute steering vectors
 
+This command computes per-layer steering vectors from prompt activations.
+
 ```bash
 python generate_steering_vectors.py \
   --models openai-community/gpt2 google/gemma-3-1b-it \
@@ -107,6 +111,8 @@ python generate_steering_vectors.py \
 ```
 
 ### 3) Probability curves vs alpha
+
+This command sweeps steering strength and saves next-token probability curves.
 
 ```bash
 python generate_plot_data.py \
@@ -119,6 +125,8 @@ python generate_plot_data.py \
 ## Optional Evaluations
 
 ### Behavior score (judge model)
+
+This command measures concept presence in a steered model with a judge model across alpha values.
 
 ```bash
 python generate_behavior.py \
@@ -133,6 +141,8 @@ python generate_behavior.py \
 
 Prepare an evaluation parquet first (example: one FineWeb shard):
 
+This command downloads and writes an evaluation parquet shard for scoring.
+
 ```bash
 python dataset_eval_processing.py \
   --dataset HuggingFaceFW/fineweb-edu \
@@ -141,6 +151,8 @@ python dataset_eval_processing.py \
   --file_idx 0 \
   --out_dir fineweb_eval_parquet
 ```
+
+This command computes cross-entropy curves over steering strengths.
 
 ```bash
 python generate_cross_entropy.py \
@@ -152,6 +164,8 @@ python generate_cross_entropy.py \
 
 ### MMLU
 
+This command evaluates MMLU accuracy as steering strength changes.
+
 ```bash
 python generate_mmlu.py \
   --models openai-community/gpt2 \
@@ -161,6 +175,8 @@ python generate_mmlu.py \
 ```
 
 ### Log-Odds
+
+This command computes token log-odds as in the paper from prompts in the sets $P$ and $N$.
 
 ```bash
 python generate_log_odds.py \
