@@ -1,6 +1,6 @@
 # Towards Understanding Steering Strength codebase
 
-Codebase for steering-vector experiments used for [Towards Understanding Steering Strength](https://arxiv.org/abs/2602.02712).  
+Codebase for steering-vector experiments used in [Towards Understanding Steering Strength](https://arxiv.org/abs/2602.02712).  
 
 ## What This Repository Does
 
