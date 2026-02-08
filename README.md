@@ -1,27 +1,26 @@
 # Towards Understanding Steering Strength codebase
 
-Codebase for steering-vector experiments used for:
-ArXiv: https://arxiv.org/abs/2602.02712  
+Codebase for steering-vector experiments used for [Towards Understanding Steering Strength](https://arxiv.org/abs/2602.02712).  
 
 ## What This Repository Does
 
-This repo implements a full activation steering workflow for causal LMs:
+This repository implements activation steering for causal LMs:
 
 1. Generate concept-positive and concept-negative prompt datasets.
 2. Compute per-layer steering vectors from activation mean differences.
 3. Sweep steering strength `alpha` and evaluate effects with:
-   - next token probability curves,
-   - behavior judge scores,
-   - cross-entropy curves,
-   - MMLU accuracy,
-   - compute token log-odds.
+   - next token probability curves (`generate_plot_data.py`),
+   - concept presence probabilities judge scores (`generate_behavior.py`),
+   - cross-entropy curves (`generate_cross_entropy.py`),
+   - MMLU accuracy (`generate_mmlu.py`),
+   - compute token log-odds (`generate_log_odds.py`).
 
 ## Project Structure
 
 - `generate_prompts.py`: builds concept prompt datasets (`*_positive.jsonl`, `*_negative.jsonl`).
 - `generate_steering_vectors.py`: computes steering vectors and saves `layer_<i>.pt`.
 - `generate_plot_data.py`: runs alpha sweeps and saves token probability curves (`.npz`).
-- `generate_behavior.py`: behavior-score sweeps with a judge model (`.npz`).
+- `generate_behavior.py`: concept presence probabilities sweeps with a judge model (`.npz`).
 - `generate_cross_entropy.py`: cross-entropy vs alpha (`.npz`).
 - `dataset_eval_processing.py`: downloads a filtered eval parquet shard (for cross-entropy runs).
 - `generate_mmlu.py`: MMLU vs alpha (`.json`).
