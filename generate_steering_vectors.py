@@ -38,7 +38,10 @@ def pair_jobs(models, concepts, mode="product"):
     return jobs
 
 async def main_async(args):
-    cfg = SteeringConfig(seed=args.seed)
+    cfg = SteeringConfig(
+        seed=args.seed,
+        contrastive=args.contrastive,
+    )
 
     in_dir = Path(args.in_dir)
     if not in_dir.exists():
@@ -139,6 +142,11 @@ def parse_args():
 
     # Tokenization / compute knobs
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--contrastive",
+        action="store_true",
+        help="Read <concept>_negative.jsonl contrastive prompt files.",
+    )
     return p.parse_args()
 
 
