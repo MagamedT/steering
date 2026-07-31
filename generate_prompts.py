@@ -18,6 +18,9 @@ async def main_async(args):
         # this is used in prompts_actor.py to decide when it is safe to apply chat_template
         name_of_model_instruct=args.model_generating_concept,
         contrastive=args.contrastive,
+        n_related=args.n_related,
+        n_unrelated=args.n_unrelated,
+        batch_size=args.batch_size,
     )
 
     concepts: List[str] = list(args.concepts)
@@ -191,6 +194,24 @@ def parse_args():
             "--model_generating_concept using explicit contrastive prompts. "
             "--models is ignored."
         ),
+    )
+    p.add_argument(
+        "--n_related",
+        type=int,
+        default=GenConfig.n_related,
+        help="Number of positive prompts to generate per concept.",
+    )
+    p.add_argument(
+        "--n_unrelated",
+        type=int,
+        default=GenConfig.n_unrelated,
+        help="Number of negative prompts to generate per concept and model.",
+    )
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=GenConfig.batch_size,
+        help="Generation batch size; must divide both prompt counts evenly.",
     )
     return p.parse_args()
 
