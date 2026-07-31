@@ -24,7 +24,6 @@ class SteeringConfig:
     max_length: int = 300
     dtype: str = "float32"
     seed: int = 42
-    is_padded_masked: bool = True
     n_positive: int | None = None
     n_negative: int | None = None
     contrastive: bool = False
@@ -152,7 +151,7 @@ class SteeringActor(Actor):
                     # some transformer on huggingface have activation as Tuples and not only tensor type
                     activation = output[0] if isinstance(output, (tuple, list)) else output  # [B,T,H] on GPU, with B the number of input prompts, T the prompt length, and H the hidden_size
                     B, T, H = activation.shape
-                    if cfg.is_padded_masked and current_mask is not None:
+                    if current_mask is not None:
                         # Mean over real tokens per prompt, then average over prompts in batch.
                         masked_activation_mean = activation * current_mask.unsqueeze(-1).to(activation.dtype)
                         masked_activation_mean = masked_activation_mean.sum(dim = 1) * 1/current_token_count.unsqueeze(-1) 
@@ -183,11 +182,8 @@ class SteeringActor(Actor):
                     input_ids = tokenized_prompts["input_ids"].to("cuda", non_blocking=True)
                     # attention mask in our case contains 0 only on padded tokens
                     attn_mask = tokenized_prompts["attention_mask"].to("cuda", non_blocking=True)
-                    if cfg.is_padded_masked:
-                        current_mask = attn_mask
-                        current_token_count = attn_mask.sum(dim = 1)
-                    else:
-                        current_mask = None
+                    current_mask = attn_mask
+                    current_token_count = attn_mask.sum(dim = 1)
                     # model inference to record the activations, we save the logits in _ for the GC of python
                     _ = model(input_ids=input_ids, attention_mask=attn_mask)
                     # every now and then, let the process sleep to let the GPU communicate with Monarch internals
@@ -202,11 +198,8 @@ class SteeringActor(Actor):
                     tokenized_prompts = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=int(cfg.max_length))
                     input_ids = tokenized_prompts["input_ids"].to("cuda", non_blocking=True)
                     attn_mask = tokenized_prompts["attention_mask"].to("cuda", non_blocking=True)
-                    if cfg.is_padded_masked:
-                        current_mask = attn_mask
-                        current_token_count = attn_mask.sum(dim = 1)
-                    else:
-                        current_mask = None
+                    current_mask = attn_mask
+                    current_token_count = attn_mask.sum(dim = 1)
                     _ = model(input_ids=input_ids, attention_mask=attn_mask)
                     if step % progress_every == 0:
                         await asyncio.sleep(0)
