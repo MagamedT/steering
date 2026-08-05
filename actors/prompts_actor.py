@@ -5,7 +5,6 @@ import asyncio
 
 import torch
 from dataclasses import dataclass
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from monarch.actor import Actor, endpoint
 
 from .utils import slugify, load_model_and_tokenizer

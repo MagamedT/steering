@@ -2,7 +2,6 @@ import argparse
 import asyncio
 from dataclasses import asdict
 from pathlib import Path
-import json
 import torch
 from monarch.actor import this_host
 
