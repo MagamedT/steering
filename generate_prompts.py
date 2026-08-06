@@ -1,13 +1,14 @@
 import argparse
 import asyncio
 from dataclasses import asdict
-from typing import List, Dict
+from typing import List
 
 
 import torch
 from monarch.actor import this_host
 
 from actors.prompts_actor import LLMActor, GenConfig
+from launcher_utils import run_ranked_jobs
 
 
 async def main_async(args):
@@ -47,8 +48,6 @@ async def main_async(args):
         Run one full pass over all concepts for a given mode ("related", "unrelated", or "both")
         using whatever model is currently loaded inside the actors.
         """
-        next_idx = 0
-        in_flight: Dict[asyncio.Task, int] = {}
 
         async def run_one(rank: int, concept: str):
             return await actor_for(rank).generate_for_concept.call_one(
@@ -59,41 +58,19 @@ async def main_async(args):
                 mode,
                 negative_model_tag,
             )
-
-        # Kick off initial tasks (up to use_gpus)
-        for r in range(min(use_gpus, len(concepts))):
-            c = concepts[next_idx]
-            next_idx += 1
-            print(f"→ [mode={mode}] [gpu {r}] started: '{c}'", flush=True)
-            task = asyncio.create_task(run_one(r, c))
-            in_flight[task] = r
-
+        # As-completed scheduling keeps all GPUs busy during variable-length jobs.
         results_all = []
-        while in_flight:
-            done, _pending = await asyncio.wait(
-                in_flight.keys(), return_when=asyncio.FIRST_COMPLETED
+        concept_jobs = [(concept,) for concept in concepts]
+        async for rank, result in run_ranked_jobs(concept_jobs, use_gpus, run_one):
+            if isinstance(result, Exception):
+                print(f"[mode={mode}] [gpu {rank}] ERROR: {result}", flush=True)
+                raise result
+            results_all.append(result)
+            print(
+                f"[mode={mode}] [gpu {result['rank']}] concept='{result['concept']}' "
+                f"related={result['related']} unrelated={result['unrelated']} -> {result['files']}",
+                flush=True,
             )
-            for t in done:
-                rank = in_flight.pop(t)
-                try:
-                    res = await t  # already done
-                    results_all.append(res)
-                    print(
-                        f"[mode={mode}] [gpu {res['rank']}] concept='{res['concept']}' "
-                        f"related={res['related']} unrelated={res['unrelated']} -> {res['files']}",
-                        flush=True,
-                    )
-                except Exception as e:
-                    print(f"[mode={mode}] [gpu {rank}] ERROR: {e}", flush=True)
-                    raise
-
-                # Immediately schedule next concept on this now-free GPU (if any left)
-                if next_idx < len(concepts):
-                    c = concepts[next_idx]
-                    next_idx += 1
-                    print(f"→ [mode={mode}] [gpu {rank}] started: '{c}'", flush=True)
-                    task = asyncio.create_task(run_one(rank, c))
-                    in_flight[task] = rank
 
         return results_all
 

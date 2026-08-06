@@ -7,6 +7,7 @@ from monarch.actor import this_host
 
 from actors.steering_vector_actor import SteeringActor, SteeringConfig
 from actors.utils import discover_concepts
+from launcher_utils import run_ranked_jobs
 
 def pair_jobs(models, concepts, mode="product"):
     """
@@ -83,39 +84,18 @@ async def main_async(args):
         )
 
     # Dynamic scheduler: each GPU immediately pulls the next pending job.
-    next_idx = 0
-    in_flight = {}
-
-    # Kick off initial tasks
-    for r in range(min(use_gpus, len(jobs))):
-        m, slug, label = jobs[next_idx]; next_idx += 1
-        print(f"→ [gpu {r}] start model='{m}' concept='{label}' (slug={slug})", flush=True)
-        task = asyncio.create_task(run_one(r, m, slug, label))
-        in_flight[task] = r
-
-    while in_flight:
-        done, _ = await asyncio.wait(in_flight.keys(), return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            rank = in_flight.pop(t)
-            try:
-                res = await t
-                if isinstance(res, dict) and "error" in res:
-                    print(f"[gpu {rank}] ERROR: {res['error']}", flush=True)
-                else:
-                    print(
-                        f"[gpu {res['rank']}] model='{res['model']}' concept='{res['concept']}' "
-                        f"layers={len(res['layers'])} saved={len(res['saved'])} files",
-                        flush=True,
-                    )
-            except Exception as e:
-                print(f"[gpu {rank}] EXCEPTION: {e}", flush=True)
-                raise
-
-            if next_idx < len(jobs):
-                m, slug, label = jobs[next_idx]; next_idx += 1
-                print(f"→ [gpu {rank}] start model='{m}' concept='{label}' (slug={slug})", flush=True)
-                task = asyncio.create_task(run_one(rank, m, slug, label))
-                in_flight[task] = rank
+    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
+        if isinstance(res, Exception):
+            print(f"[gpu {rank}] EXCEPTION: {res}", flush=True)
+            raise res
+        if isinstance(res, dict) and "error" in res:
+            print(f"[gpu {rank}] ERROR: {res['error']}", flush=True)
+        else:
+            print(
+                f"[gpu {res['rank']}] model='{res['model']}' concept='{res['concept']}' "
+                f"layers={len(res['layers'])} saved={len(res['saved'])} files",
+                flush=True,
+            )
 
 
 def parse_args():

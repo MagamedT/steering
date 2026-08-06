@@ -6,8 +6,9 @@ from dataclasses import asdict
 import torch
 from monarch.actor import this_host
 
-from actors.steering_plot_actor import TokenActor, TokenPlotConfig, model_slug
+from actors.steering_plot_actor import TokenActor, TokenPlotConfig
 from actors.utils import discover_jobs
+from launcher_utils import run_ranked_jobs
 
 
 async def main_async(args):
@@ -59,34 +60,14 @@ async def main_async(args):
         )
 
     # As-completed scheduling keeps all GPUs busy during variable-length jobs.
-    next_idx = 0
-    in_flight: dict[asyncio.Task, int] = {}
-
-    # kick initial
-    for r in range(min(use_gpus, len(jobs))):
-        m, slug, label = jobs[next_idx]; next_idx += 1
-        print(f"→ [gpu {r}] start model='{m}' concept='{label}' (slug={slug})", flush=True)
-        task = asyncio.create_task(run_one(r, m, slug, label))
-        in_flight[task] = r
-
-    while in_flight:
-        done, _ = await asyncio.wait(in_flight.keys(), return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            rank = in_flight.pop(t)
-            try:
-                res = await t
-                if isinstance(res, dict) and "ok" in res:
-                    print(f"[gpu {rank}] finished", flush=True)
-                else:
-                    print(f"[gpu {rank}] unexpected result: {res}", flush=True)
-            except Exception as e:
-                print(f"[gpu {rank}] EXCEPTION: {e}", flush=True)
-                raise
-            if next_idx < len(jobs):
-                m, slug, label = jobs[next_idx]; next_idx += 1
-                print(f"→ [gpu {rank}] start model='{m}' concept='{label}' (slug={slug})", flush=True)
-                task = asyncio.create_task(run_one(rank, m, slug, label))
-                in_flight[task] = rank
+    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
+        if isinstance(res, Exception):
+            print(f"[gpu {rank}] EXCEPTION: {res}", flush=True)
+            raise res
+        if isinstance(res, dict) and "ok" in res:
+            print(f"[gpu {rank}] finished", flush=True)
+        else:
+            print(f"[gpu {rank}] unexpected result: {res}", flush=True)
 
 
 def parse_args():

@@ -7,9 +7,8 @@ import torch
 from monarch.actor import this_host
 
 from actors.behavior_score_actor import BehaviorActor, BehaviorConfig
-from actors.steering_plot_actor import model_slug
 from actors.utils import discover_jobs
-
+from launcher_utils import run_ranked_jobs
 
 async def main_async(args):
     # Behavior settings come from actor defaults.
@@ -62,39 +61,17 @@ async def main_async(args):
             rank_hint=rank,
         )
 
-    # Dynamic scheduler (as-completed)
-    next_idx = 0
-    in_flight: dict[asyncio.Task, int] = {}
-
-    for r in range(min(use_gpus, len(jobs))):
-        m, slug, label = jobs[next_idx]
-        next_idx += 1
-        print(f"→ [gpu {r}] start model='{m}' concept='{label}' (slug={slug})", flush=True)
-        task = asyncio.create_task(run_one(r, m, slug, label))
-        in_flight[task] = r
-
-    while in_flight:
-        done, _ = await asyncio.wait(in_flight.keys(), return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            rank = in_flight.pop(t)
-            try:
-                res = await t
-                if isinstance(res, dict) and res.get("ok"):
-                    files = [rinfo.get("file") for rinfo in (res.get("results") or []) if rinfo.get("file")]
-                    msg = files[0] if files else "(no files)"
-                    print(f"[gpu {rank}] finished -> {msg}", flush=True)
-                else:
-                    print(f"[gpu {rank}] unexpected result: {res}", flush=True)
-            except Exception as e:
-                print(f"[gpu {rank}] EXCEPTION: {e}", flush=True)
-                raise
-
-            if next_idx < len(jobs):
-                m, slug, label = jobs[next_idx]
-                next_idx += 1
-                print(f"→ [gpu {rank}] start model='{m}' concept='{label}' (slug={slug})", flush=True)
-                task = asyncio.create_task(run_one(rank, m, slug, label))
-                in_flight[task] = rank
+    # As-completed scheduling keeps all GPUs busy during variable-length jobs.
+    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
+        if isinstance(res, Exception):
+            print(f"[gpu {rank}] EXCEPTION: {res}", flush=True)
+            raise res
+        if isinstance(res, dict) and res.get("ok"):
+            files = [rinfo.get("file") for rinfo in (res.get("results") or []) if rinfo.get("file")]
+            msg = files[0] if files else "(no files)"
+            print(f"[gpu {rank}] finished -> {msg}", flush=True)
+        else:
+            print(f"[gpu {rank}] unexpected result: {res}", flush=True)
 
 
 def parse_args():

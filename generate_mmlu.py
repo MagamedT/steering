@@ -24,6 +24,7 @@ from monarch.actor import this_host
 
 from actors.mmlu_actor import MMLUActor, MMLUEvalConfig
 from actors.utils import discover_jobs
+from launcher_utils import run_ranked_jobs
 
 
 async def main_async(args):
@@ -76,34 +77,12 @@ async def main_async(args):
             rank_hint=rank,
         )
 
-    next_idx = 0
-    in_flight: dict[asyncio.Task, int] = {}
-
-    # Prime each GPU with one job
-    for r in range(min(use_gpus, len(jobs))):
-        model_name, slug, label = jobs[next_idx]
-        next_idx += 1
-        print(f"-> [gpu {r}] start model='{model_name}' concept='{label}' (slug={slug})", flush=True)
-        task = asyncio.create_task(run_one(r, model_name, slug, label))
-        in_flight[task] = r
-
-    # Simple work-stealing loop
-    while in_flight:
-        done, _ = await asyncio.wait(in_flight.keys(), return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            rank = in_flight.pop(t)
-            try:
-                res = await t
-                print(f"[gpu {rank}] finished: {res}", flush=True)
-            except Exception as e:
-                print(f"[gpu {rank}] FAILED: {type(e).__name__}: {e}", flush=True)
-
-            if next_idx < len(jobs):
-                model_name, slug, label = jobs[next_idx]
-                next_idx += 1
-                print(f"-> [gpu {rank}] start model='{model_name}' concept='{label}' (slug={slug})", flush=True)
-                task = asyncio.create_task(run_one(rank, model_name, slug, label))
-                in_flight[task] = rank
+    # As-completed scheduling keeps all GPUs busy during variable-length jobs.
+    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
+        if isinstance(res, Exception):
+            print(f"[gpu {rank}] FAILED: {type(res).__name__}: {res}", flush=True)
+            continue
+        print(f"[gpu {rank}] finished: {res}", flush=True)
 
 
 def parse_args():
