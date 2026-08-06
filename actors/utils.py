@@ -55,6 +55,22 @@ def discover_concepts(in_dir: Path):
         concepts.append((s, label))
     return concepts
 
+def discover_jobs(steer_dir: Path, models: list[str]) -> list[tuple[str, str, str]]:
+    """Return list of (model_name, concept_slug, concept_label). Label is slug with spaces."""
+    jobs: list[tuple[str, str, str]] = []
+    for model_name in models:
+        mslug = model_slug(model_name)
+        base = steer_dir / mslug
+        if not base.exists():
+            continue
+        for concept_dir in sorted([p for p in base.iterdir() if p.is_dir()]):
+            slug = concept_dir.name
+            label = slug.replace("_", " ")
+            if not any(concept_dir.glob("layer_*.pt")):
+                continue
+            jobs.append((model_name, slug, label))
+    return jobs
+
 def slugify(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", s.strip().lower()).strip("-") or "concept"
 
