@@ -23,7 +23,6 @@ import torch
 from monarch.actor import this_host
 
 from actors.mmlu_actor import MMLUActor, MMLUEvalConfig
-from actors.utils import model_slug
 
 
 def discover_jobs(steer_dir: Path, models: list[str]) -> list[tuple[str, str, str]]:

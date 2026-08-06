@@ -70,8 +70,6 @@ class BehaviorConfig:
         "Answer:"
     )
     judge_max_prompt_length: int = 4000
-    judge_batch_size: int = 64
-    judge_max_completion_chars: int = 4000
 
     # progress / responsiveness
     progress_every: int = 1
@@ -155,7 +153,7 @@ class BehaviorActor(Actor):
             )
         self._judge_token_ids_10 = (ones, zeros)
 
-    def _join_samples_for_judge(self, samples: List[str], cfg: BehaviorConfig) -> str:
+    def _join_samples_for_judge(self, samples: List[str]) -> str:
         """
         Join multiple samples into one mega-text for an ANY-of-K judge.
         This is where you control truncation to avoid blowing up the judge prompt.
@@ -184,7 +182,7 @@ class BehaviorActor(Actor):
         tok = self._judge_tok
         model = self._judge_model
     
-        mega_text = self._join_samples_for_judge(samples, cfg)
+        mega_text = self._join_samples_for_judge(samples)
     
         user = cfg.judge_question_template.format(concept=concept, completion=mega_text)
         prompt = maybe_apply_chat_template(tok, cfg.judge_system_prompt, user, cfg.judge_use_chat_template)
@@ -421,7 +419,7 @@ class BehaviorActor(Actor):
         results: List[Dict[str, Any]] = []
 
         # main: per layer
-        for li, layer_idx in enumerate(layer_indices):
+        for layer_idx in layer_indices:
             # load steering vector
             steer_vec_cpu = load_steer_vector(steer_dir_path, model_name, concept_slug, int(layer_idx))
             if cfg.normalize:

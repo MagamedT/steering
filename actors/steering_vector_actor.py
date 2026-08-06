@@ -149,7 +149,6 @@ class SteeringActor(Actor):
                 def _hook(module, inputs, output):
                     # some transformer on huggingface have activation as Tuples and not only tensor type
                     activation = output[0] if isinstance(output, (tuple, list)) else output  # [B,T,H] on GPU, with B the number of input prompts, T the prompt length, and H the hidden_size
-                    B, T, H = activation.shape
                     if current_mask is not None:
                         # Mean over real tokens per prompt, then average over prompts in batch.
                         masked_activation_mean = activation * current_mask.unsqueeze(-1).to(activation.dtype)
