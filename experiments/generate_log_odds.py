@@ -6,11 +6,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from monarch.actor import this_host
+from monarch.actor import shutdown_context, this_host
 
-from ..actors.log_odds_actor import LogOddsActor, LogOddsConfig
-from ..actors.utils import model_slug, slugify
-from .launcher_utils import run_ranked_jobs
+from actors.log_odds_actor import LogOddsActor, LogOddsConfig
+from actors.utils import model_slug, slugify
+from experiments.launcher_utils import run_ranked_jobs
 
 
 def discover_jobs(prompts_dir: Path, models: list[str]) -> list[tuple[str, str, str]]:
@@ -101,4 +101,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    asyncio.run(main_async(parse_args()))
+    try:
+        asyncio.run(main_async(parse_args()))
+    finally:
+        shutdown_context().get()

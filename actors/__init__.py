@@ -1,6 +1,6 @@
 from .prompts_actor import LLMActor, GenConfig
 from .steering_vector_actor import SteeringActor, SteeringConfig
-from .steering_plot_actor import TokenPlotConfig, TokenActor
+from .next_token_probs_actor import TokenPlotConfig, TokenActor
 from .cross_entropy_actor import CrossEntropyPlotConfig, CrossEntropyActor
 from .log_odds_actor import LogOddsActor, LogOddsConfig
 from .mmlu_actor import MMLUActor, MMLUEvalConfig

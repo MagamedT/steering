@@ -4,11 +4,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from monarch.actor import this_host
+from monarch.actor import shutdown_context, this_host
 
-from ..actors.behavior_score_actor import BehaviorActor, BehaviorConfig
-from ..actors.utils import discover_jobs
-from .launcher_utils import run_ranked_jobs
+from actors.concept_probs_actor import BehaviorActor, BehaviorConfig
+from actors.utils import discover_jobs
+from experiments.launcher_utils import run_ranked_jobs
 
 async def main_async(args):
     # Behavior settings come from actor defaults.
@@ -105,4 +105,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main_async(args))
+    try:
+        asyncio.run(main_async(args))
+    finally:
+        shutdown_context().get()

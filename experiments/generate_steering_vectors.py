@@ -3,11 +3,11 @@ import asyncio
 from dataclasses import asdict
 from pathlib import Path
 import torch
-from monarch.actor import this_host
+from monarch.actor import shutdown_context, this_host
 
-from ..actors.steering_vector_actor import SteeringActor, SteeringConfig
-from ..actors.utils import discover_concepts
-from .launcher_utils import run_ranked_jobs
+from actors.steering_vector_actor import SteeringActor, SteeringConfig
+from actors.utils import discover_concepts
+from experiments.launcher_utils import run_ranked_jobs
 
 def pair_jobs(models, concepts, mode="product"):
     """
@@ -131,4 +131,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main_async(args))
+    try:
+        asyncio.run(main_async(args))
+    finally:
+        shutdown_context().get()

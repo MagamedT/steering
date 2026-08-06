@@ -244,35 +244,50 @@ Structure the response as: one-sentence definition then several first-person exa
             if mode in ("both", "related"):
                 if pos_input_ids is None or pos_attention_mask is None:
                     raise RuntimeError("Internal: positive prompt inputs were not prepared.")
-                n_batches_rel = cfg.n_related // cfg.batch_size
+                target_rel = int(cfg.n_related)
+                max_attempts_rel = 10 * max(1, (target_rel + cfg.batch_size - 1) // cfg.batch_size)
                 with open(path_rel, "w", encoding="utf-8") as f_rel:
-                    for i in range(n_batches_rel):
+                    attempt = 0
+                    while produced_rel < target_rel and attempt < max_attempts_rel:
                         out_ids = self.model.generate(
                             input_ids=pos_input_ids,
                             attention_mask=pos_attention_mask,
                             **gen_kwargs,
                         )
                         new_tokens = out_ids[:, pos_prompt_len:]
-                        texts = self.tok.batch_decode(new_tokens, skip_special_tokens=True)
+                        texts = [
+                            text.strip()
+                            for text in self.tok.batch_decode(new_tokens, skip_special_tokens=True)
+                            if text.strip()
+                        ]
+                        texts = texts[: target_rel - produced_rel]
 
                         for t in texts:
                             f_rel.write(
-                                json.dumps({"concept": concept, "kind": "positive", "text": t.strip()})
+                                json.dumps({"concept": concept, "kind": "positive", "text": t})
                                 + "\n"
                             )
 
-                        if i % 2 == 1:
-                            f_rel.flush()
                         produced_rel += len(texts)
-                        if i % 5 == 4:
+                        attempt += 1
+                        if attempt % 2 == 0:
+                            f_rel.flush()
+                        if attempt % 5 == 0:
                             await asyncio.sleep(0)  # keep mailbox responsive
+                if produced_rel != target_rel:
+                    raise RuntimeError(
+                        f"Generated only {produced_rel}/{target_rel} non-empty positive samples "
+                        f"after {max_attempts_rel} attempts."
+                    )
                 files.append(str(path_rel))
 
             # NEGATIVE
             if mode in ("both", "unrelated"):
-                n_batches_unr = cfg.n_unrelated // cfg.batch_size
+                target_unrel = int(cfg.n_unrelated)
+                max_attempts_unrel = 10 * max(1, (target_unrel + cfg.batch_size - 1) // cfg.batch_size)
                 with open(path_unrel, "w", encoding="utf-8") as f_unrel:
-                    for j in range(n_batches_unr):
+                    attempt = 0
+                    while produced_unrel < target_unrel and attempt < max_attempts_unrel:
                         if cfg.contrastive:
                             if neg_input_ids is None or neg_attention_mask is None:
                                 raise RuntimeError(
@@ -284,25 +299,34 @@ Structure the response as: one-sentence definition then several first-person exa
                                 **gen_kwargs,
                             )
                             new_tokens = out_ids[:, neg_prompt_len:]
-                            texts = self.tok.batch_decode(new_tokens, skip_special_tokens=True)
+                            decoded = self.tok.batch_decode(new_tokens, skip_special_tokens=True)
                         else:
                             # Unconditional generation from BOS using the CURRENTLY LOADED model
                             out_ids = self.model.generate(input_ids=start, **gen_kwargs)
                             if out_ids.shape[1] > 1:
                                 out_ids = out_ids[:, 1:]  # drop BOS for cleaner strings
-                            texts = self.tok.batch_decode(out_ids, skip_special_tokens=True)
+                            decoded = self.tok.batch_decode(out_ids, skip_special_tokens=True)
+
+                        texts = [text.strip() for text in decoded if text.strip()]
+                        texts = texts[: target_unrel - produced_unrel]
 
                         for t in texts:
                             f_unrel.write(
-                                json.dumps({"concept": concept, "kind": "negative", "text": t.strip()})
+                                json.dumps({"concept": concept, "kind": "negative", "text": t})
                                 + "\n"
                             )
 
-                        if j % 2 == 1:
-                            f_unrel.flush()
                         produced_unrel += len(texts)
-                        if j % 5 == 4:
+                        attempt += 1
+                        if attempt % 2 == 0:
+                            f_unrel.flush()
+                        if attempt % 5 == 0:
                             await asyncio.sleep(0)
+                if produced_unrel != target_unrel:
+                    raise RuntimeError(
+                        f"Generated only {produced_unrel}/{target_unrel} non-empty negative samples "
+                        f"after {max_attempts_unrel} attempts."
+                    )
                 files.append(str(path_unrel))
 
         torch.cuda.empty_cache()

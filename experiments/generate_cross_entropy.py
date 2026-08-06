@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# generate_plot_data.py
+# generate_cross_entropy.py
 #
 # Monarch launcher for cross-entropy-vs-α steering curves.
 
@@ -9,11 +9,11 @@ from pathlib import Path
 from dataclasses import asdict
 
 import torch
-from monarch.actor import this_host
+from monarch.actor import shutdown_context, this_host
 
-from ..actors.cross_entropy_actor import CrossEntropyActor, CrossEntropyPlotConfig
-from ..actors.utils import discover_jobs
-from .launcher_utils import run_ranked_jobs
+from actors.cross_entropy_actor import CrossEntropyActor, CrossEntropyPlotConfig
+from actors.utils import discover_jobs
+from experiments.launcher_utils import run_ranked_jobs
 
 
 async def main_async(args):
@@ -87,4 +87,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main_async(args))
+    try:
+        asyncio.run(main_async(args))
+    finally:
+        shutdown_context().get()

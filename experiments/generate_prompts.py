@@ -5,10 +5,10 @@ from typing import List
 
 
 import torch
-from monarch.actor import this_host
+from monarch.actor import shutdown_context, this_host
 
-from ..actors.prompts_actor import LLMActor, GenConfig
-from .launcher_utils import run_ranked_jobs
+from actors.prompts_actor import LLMActor, GenConfig
+from experiments.launcher_utils import run_ranked_jobs
 
 
 async def main_async(args):
@@ -195,4 +195,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main_async(args))
+    try:
+        asyncio.run(main_async(args))
+    finally:
+        shutdown_context().get()

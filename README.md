@@ -9,8 +9,8 @@ This repository implements activation steering for causal LMs:
 1. Generate concept-positive and concept-negative prompt datasets (`experiments/generate_prompts.py`).
 2. Compute per-layer steering vectors from activation mean differences (`experiments/generate_steering_vectors.py`).
 3. Sweep steering strength `alpha` and evaluate effects with:
-   - next token probability curves (`experiments/generate_plot_data.py`),
-   - concept presence probabilities judge scores (`experiments/generate_behavior.py`),
+   - next token probability curves (`experiments/generate_next_token_probs.py`),
+   - concept presence probabilities judge scores (`experiments/generate_concept_probs.py`),
    - cross-entropy curves (`experiments/generate_cross_entropy.py`),
    - MMLU accuracy (`experiments/generate_mmlu.py`),
    - compute token log-odds (`experiments/generate_log_odds.py`).
@@ -20,8 +20,8 @@ This repository implements activation steering for causal LMs:
 - `experiments/`: experiment entry points and launcher utilities.
 - `experiments/generate_prompts.py`: builds concept prompt datasets (`*_positive.jsonl`, `*_negative.jsonl`).
 - `experiments/generate_steering_vectors.py`: computes steering vectors and saves `layer_<i>.pt`.
-- `experiments/generate_plot_data.py`: runs alpha sweeps and saves token probability curves (`.npz`).
-- `experiments/generate_behavior.py`: concept presence probabilities sweeps with a judge model (`.npz`).
+- `experiments/generate_next_token_probs.py`: runs alpha sweeps and saves token probability curves (`.npz`).
+- `experiments/generate_concept_probs.py`: concept presence probabilities sweeps with a judge model (`.npz`).
 - `experiments/generate_cross_entropy.py`: cross-entropy vs alpha (`.npz`).
 - `experiments/generate_eval_dataset.py`: downloads a filtered eval parquet shard (for cross-entropy runs).
 - `experiments/generate_mmlu.py`: MMLU vs alpha (`.json`).
@@ -124,7 +124,7 @@ python experiments/generate_steering_vectors.py \
 This command sweeps steering strength and saves next-token probability curves.
 
 ```bash
-python experiments/generate_plot_data.py \
+python experiments/generate_next_token_probs.py \
   --models openai-community/gpt2 google/gemma-3-1b-it \
   --steer_dir steering_vectors \
   --contexts_file data/contexts.jsonl \
@@ -138,7 +138,7 @@ python experiments/generate_plot_data.py \
 This command measures concept presence in a steered model with a judge model across alpha values.
 
 ```bash
-python experiments/generate_behavior.py \
+python experiments/generate_concept_probs.py \
   --models openai-community/gpt2 \
   --judge_model google/gemma-3-12b-it \
   --steer_dir steering_vectors \
@@ -212,7 +212,7 @@ Most outputs are grouped by model slug and concept slug:
 
 ## Notes
 
-- To change experiment settings (for example batch size, steering-vector normalization, or contrastive prompts), edit the `@dataclass` config blocks in the corresponding files under `actors/` (for example `actors/steering_vector_actor.py`, `actors/steering_plot_actor.py`, `actors/behavior_score_actor.py`, `actors/cross_entropy_actor.py`, `actors/log_odds_actor.py`).
+- To change experiment settings (for example batch size, steering-vector normalization, or contrastive prompts), edit the `@dataclass` config blocks in the corresponding files under `actors/` (for example `actors/steering_vector_actor.py`, `actors/next_token_probs_actor.py`, `actors/concept_probs_actor.py`, `actors/cross_entropy_actor.py`, `actors/log_odds_actor.py`).
 
 
 ## Citation

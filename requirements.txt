@@ -1,5 +1,7 @@
 torchmonarch
+torch
 transformers
 datasets
+accelerate
 huggingface_hub
 deepeval
