@@ -6,9 +6,9 @@ from dataclasses import asdict
 import torch
 from monarch.actor import this_host
 
-from actors.steering_plot_actor import TokenActor, TokenPlotConfig
-from actors.utils import discover_jobs
-from launcher_utils import run_ranked_jobs
+from ..actors.steering_plot_actor import TokenActor, TokenPlotConfig
+from ..actors.utils import discover_jobs
+from .launcher_utils import run_ranked_jobs
 
 
 async def main_async(args):
@@ -76,7 +76,7 @@ def parse_args():
                    help="HF model ids or local paths for which steer vectors exist.")
     p.add_argument("--steer_dir", default="steering_vectors",
                    help="Root directory containing steering vectors (model_slug/concept_slug/layer_*.pt).")
-    p.add_argument("--contexts_file", default="contexts.jsonl",
+    p.add_argument("--contexts_file", default="data/contexts.jsonl",
                    help="Text file with one input context per line.")
     p.add_argument("--out_dir", default="plot_data",
                    help="Where to write .npz curve files.")

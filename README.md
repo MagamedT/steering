@@ -6,25 +6,26 @@ Codebase for steering-vector experiments used in [Towards Understanding Steering
 
 This repository implements activation steering for causal LMs:
 
-1. Generate concept-positive and concept-negative prompt datasets (`generate_prompts.py`).
-2. Compute per-layer steering vectors from activation mean differences (`generate_steering_vectors.py`).
+1. Generate concept-positive and concept-negative prompt datasets (`experiments/generate_prompts.py`).
+2. Compute per-layer steering vectors from activation mean differences (`experiments/generate_steering_vectors.py`).
 3. Sweep steering strength `alpha` and evaluate effects with:
-   - next token probability curves (`generate_plot_data.py`),
-   - concept presence probabilities judge scores (`generate_behavior.py`),
-   - cross-entropy curves (`generate_cross_entropy.py`),
-   - MMLU accuracy (`generate_mmlu.py`),
-   - compute token log-odds (`generate_log_odds.py`).
+   - next token probability curves (`experiments/generate_plot_data.py`),
+   - concept presence probabilities judge scores (`experiments/generate_behavior.py`),
+   - cross-entropy curves (`experiments/generate_cross_entropy.py`),
+   - MMLU accuracy (`experiments/generate_mmlu.py`),
+   - compute token log-odds (`experiments/generate_log_odds.py`).
 
 ## Project Structure
 
-- `generate_prompts.py`: builds concept prompt datasets (`*_positive.jsonl`, `*_negative.jsonl`).
-- `generate_steering_vectors.py`: computes steering vectors and saves `layer_<i>.pt`.
-- `generate_plot_data.py`: runs alpha sweeps and saves token probability curves (`.npz`).
-- `generate_behavior.py`: concept presence probabilities sweeps with a judge model (`.npz`).
-- `generate_cross_entropy.py`: cross-entropy vs alpha (`.npz`).
-- `dataset_eval_processing.py`: downloads a filtered eval parquet shard (for cross-entropy runs).
-- `generate_mmlu.py`: MMLU vs alpha (`.json`).
-- `generate_log_odds.py`: non-steered token log-odds baseline (`.npz`).
+- `experiments/`: experiment entry points and launcher utilities.
+- `experiments/generate_prompts.py`: builds concept prompt datasets (`*_positive.jsonl`, `*_negative.jsonl`).
+- `experiments/generate_steering_vectors.py`: computes steering vectors and saves `layer_<i>.pt`.
+- `experiments/generate_plot_data.py`: runs alpha sweeps and saves token probability curves (`.npz`).
+- `experiments/generate_behavior.py`: concept presence probabilities sweeps with a judge model (`.npz`).
+- `experiments/generate_cross_entropy.py`: cross-entropy vs alpha (`.npz`).
+- `experiments/generate_eval_dataset.py`: downloads a filtered eval parquet shard (for cross-entropy runs).
+- `experiments/generate_mmlu.py`: MMLU vs alpha (`.json`).
+- `experiments/generate_log_odds.py`: non-steered token log-odds baseline (`.npz`).
 - `plot_probs.py`: plotting/analysis utilities.
 - `actors/`: GPU actor implementations used by torchmonarch.
 - `example_run.sh`: example Slurm batch script showing how to run all experiments.
@@ -39,6 +40,14 @@ Install Python deps:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Run experiment commands from the repository root. Because the entry points live
+in `experiments/` and import the sibling `actors` package, add the repository
+root to Python's module search path first:
+
+```bash
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
 Some models require Hugging Face authentication (for gated access). Log in before running scripts that load those models:
@@ -92,7 +101,7 @@ sbatch example_run.sh
 This command builds concept-positive and concept-negative prompt JSONL files used to build the steering vectors.
 
 ```bash
-python generate_prompts.py \
+python experiments/generate_prompts.py \
   --model_generating_concept google/gemma-3-12b-it \
   --models openai-community/gpt2 google/gemma-3-1b-it \
   --concepts joy evil \
@@ -104,7 +113,7 @@ python generate_prompts.py \
 This command computes per-layer steering vectors from prompt activations.
 
 ```bash
-python generate_steering_vectors.py \
+python experiments/generate_steering_vectors.py \
   --models openai-community/gpt2 google/gemma-3-1b-it \
   --in_dir prompts \
   --save_dir steering_vectors
@@ -115,10 +124,10 @@ python generate_steering_vectors.py \
 This command sweeps steering strength and saves next-token probability curves.
 
 ```bash
-python generate_plot_data.py \
+python experiments/generate_plot_data.py \
   --models openai-community/gpt2 google/gemma-3-1b-it \
   --steer_dir steering_vectors \
-  --contexts_file contexts_modified.jsonl \
+  --contexts_file data/contexts.jsonl \
   --out_dir plot_data
 ```
 
@@ -129,11 +138,11 @@ python generate_plot_data.py \
 This command measures concept presence in a steered model with a judge model across alpha values.
 
 ```bash
-python generate_behavior.py \
+python experiments/generate_behavior.py \
   --models openai-community/gpt2 \
   --judge_model google/gemma-3-12b-it \
   --steer_dir steering_vectors \
-  --contexts_file contexts_modified.jsonl \
+  --contexts_file data/contexts.jsonl \
   --out_dir behavior_data
 ```
 
@@ -144,7 +153,7 @@ Prepare an evaluation parquet first (example: one FineWeb shard):
 This command downloads and writes an evaluation parquet shard for scoring.
 
 ```bash
-python dataset_eval_processing.py \
+python experiments/generate_eval_dataset.py \
   --dataset HuggingFaceFW/fineweb-edu \
   --remote_name sample-10BT \
   --split train \
@@ -155,7 +164,7 @@ python dataset_eval_processing.py \
 This command computes cross-entropy curves over steering strengths.
 
 ```bash
-python generate_cross_entropy.py \
+python experiments/generate_cross_entropy.py \
   --models openai-community/gpt2 \
   --steer_dir steering_vectors \
   --eval_parquet fineweb_eval_parquet/sample/10BT/000_00000.parquet \
@@ -167,7 +176,7 @@ python generate_cross_entropy.py \
 This command evaluates MMLU accuracy as steering strength changes.
 
 ```bash
-python generate_mmlu.py \
+python experiments/generate_mmlu.py \
   --models openai-community/gpt2 \
   --tasks HIGH_SCHOOL_COMPUTER_SCIENCE \
   --steer_dir steering_vectors \
@@ -179,7 +188,7 @@ python generate_mmlu.py \
 This command computes token log-odds as in the paper from prompts in the sets $P$ and $N$.
 
 ```bash
-python generate_log_odds.py \
+python experiments/generate_log_odds.py \
   --models openai-community/gpt2 \
   --prompts_dir prompts \
   --out_dir log_odds

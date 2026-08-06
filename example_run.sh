@@ -24,7 +24,7 @@ MODELS=(
 )
 CONCEPTS=(joy evil)
 MODEL_GENERATING_CONCEPT="google/gemma-3-12b-it"
-CONTEXTS_FILE="${CODE_ROOT}/contexts_modified.jsonl"         
+CONTEXTS_FILE="${CODE_ROOT}/data/contexts.jsonl"
 EVAL_PARQUET="/workspace/fineweb_eval_parquet/sample/10BT/000_00000.parquet" 
 
 mkdir -p "${EXP_ROOT}"
@@ -41,27 +41,27 @@ for SEED in "${SEEDS[@]}"; do
 
   mkdir -p "${PROMPTS_DIR}" "${STEERING_DIR}" "${PLOT_DIR}" "${LOG_ODDS_DIR}" "${XENT_DIR}" "${MMLU_DIR}"
 
-  python3 "${CODE_ROOT}/generate_prompts.py" \
+  python3 "${CODE_ROOT}/experiments/generate_prompts.py" \
     --model_generating_concept "${MODEL_GENERATING_CONCEPT}" \
     --models "${MODELS[@]}" \
     --concepts "${CONCEPTS[@]}" \
     --out_dir "${PROMPTS_DIR}" \
     --seed "${SEED}"
 
-  python3 "${CODE_ROOT}/generate_steering_vectors.py" \
+  python3 "${CODE_ROOT}/experiments/generate_steering_vectors.py" \
     --models "${MODELS[@]}" \
     --in_dir "${PROMPTS_DIR}" \
     --save_dir "${STEERING_DIR}" \
     --seed "${SEED}"
 
-  python3 "${CODE_ROOT}/generate_plot_data.py" \
+  python3 "${CODE_ROOT}/experiments/generate_plot_data.py" \
     --models "${MODELS[@]}" \
     --steer_dir "${STEERING_DIR}" \
     --contexts_file "${CONTEXTS_FILE}" \
     --out_dir "${PLOT_DIR}" \
     --seed "${SEED}"
 
-  python3 "${CODE_ROOT}/generate_behavior.py" \
+  python3 "${CODE_ROOT}/experiments/generate_behavior.py" \
   --models "${MODELS[@]}" \
   --judge_model "${MODEL_GENERATING_CONCEPT}" \
   --steer_dir "${STEERING_DIR}" \
@@ -69,12 +69,12 @@ for SEED in "${SEEDS[@]}"; do
   --out_dir "${BEHAVIOR_DIR}" \
   --layers 6
 
-  python3 "${CODE_ROOT}/generate_log_odds.py" \
+  python3 "${CODE_ROOT}/experiments/generate_log_odds.py" \
     --models "${MODELS[@]}" \
     --prompts_dir "${PROMPTS_DIR}" \
     --out_dir "${LOG_ODDS_DIR}"
 
-  python3 "${CODE_ROOT}/generate_cross_entropy.py" \
+  python3 "${CODE_ROOT}/experiments/generate_cross_entropy.py" \
     --models "${MODELS[@]}" \
     --steer_dir "${STEERING_DIR}" \
     --eval_parquet "${EVAL_PARQUET}" \
@@ -82,7 +82,7 @@ for SEED in "${SEEDS[@]}"; do
     --seed "${SEED}" \
     --layers 3
 
-  python3 "${CODE_ROOT}/generate_mmlu.py" \
+  python3 "${CODE_ROOT}/experiments/generate_mmlu.py" \
     --models "${MODELS[@]}" \
     --tasks HIGH_SCHOOL_COMPUTER_SCIENCE \
     --steer_dir "${STEERING_DIR}" \

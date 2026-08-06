@@ -6,9 +6,9 @@ from pathlib import Path
 import torch
 from monarch.actor import this_host
 
-from actors.behavior_score_actor import BehaviorActor, BehaviorConfig
-from actors.utils import discover_jobs
-from launcher_utils import run_ranked_jobs
+from ..actors.behavior_score_actor import BehaviorActor, BehaviorConfig
+from ..actors.utils import discover_jobs
+from .launcher_utils import run_ranked_jobs
 
 async def main_async(args):
     # Behavior settings come from actor defaults.
@@ -81,7 +81,7 @@ def parse_args():
     p.add_argument("--judge_model", required=True, help="HF model id/path for the binary judge model.")
 
     p.add_argument("--steer_dir", default="steering_vectors", help="Root: model_slug/concept_slug/layer_*.pt")
-    p.add_argument("--contexts_file", default="contexts.jsonl", help="JSONL contexts (negatives + per-concept positives)")
+    p.add_argument("--contexts_file", default="data/contexts.jsonl", help="JSONL contexts (negatives + per-concept positives)")
     p.add_argument("--out_dir", default="behavior_data", help="Where to write .npz behavior curve files")
 
     p.add_argument(

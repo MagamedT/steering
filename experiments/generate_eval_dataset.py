@@ -5,7 +5,7 @@ download_one_fineweb_parquet.py
 Downloads a single parquet shard from a FineWeb dataset repo on Hugging Face.
 
 Example:
-  python dataset_eval_processing.py \
+  python -m experiments.generate_eval_dataset \
     --dataset HuggingFaceFW/fineweb \
     --remote_name sample-10BT \
     --split train \
