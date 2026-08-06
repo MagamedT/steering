@@ -26,6 +26,7 @@ from transformers import (
 )
 
 from actors import concept_probs_actor
+from actors import concept_probs_continuous_actor
 from actors import cross_entropy_actor
 from actors import log_odds_actor
 from actors import mmlu_actor
@@ -34,6 +35,7 @@ from actors import next_token_probs_actor
 from actors import steering_vector_actor
 from actors.utils import model_slug
 from experiments import generate_concept_probs
+from experiments import generate_concept_probs_continuous
 from experiments import generate_cross_entropy
 from experiments import generate_eval_dataset
 from experiments import generate_log_odds
@@ -178,6 +180,7 @@ def cpu_only(model_path: Path):
         steering_vector_actor,
         next_token_probs_actor,
         concept_probs_actor,
+        concept_probs_continuous_actor,
         log_odds_actor,
         cross_entropy_actor,
         mmlu_actor,
@@ -187,6 +190,7 @@ def cpu_only(model_path: Path):
         generate_steering_vectors,
         generate_next_token_probs,
         generate_concept_probs,
+        generate_concept_probs_continuous,
         generate_log_odds,
         generate_cross_entropy,
         generate_mmlu,
@@ -253,6 +257,38 @@ def cpu_only(model_path: Path):
                     max_prompt_length=16,
                     max_new_tokens=1,
                     judge_max_prompt_length=16,
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                generate_concept_probs_continuous,
+                "BehaviorConfig",
+                small_config(
+                    concept_probs_continuous_actor.BehaviorConfig,
+                    generator_dtype="float32",
+                    judge_dtype="float32",
+                    alpha_start=-1,
+                    alpha_end=1,
+                    alpha_steps=3,
+                    n_samples_per_context=1,
+                    gen_context_batch_size=1,
+                    max_prompt_length=16,
+                    max_new_tokens=1,
+                    judge_max_prompt_length=16,
+                    judge_batch_size=1,
+                    judge_max_new_tokens=2,
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                concept_probs_continuous_actor.BehaviorActor,
+                "_judge_completion_scores",
+                lambda _self, samples, concept, cfg: torch.full(
+                    (len(samples),),
+                    0.5,
+                    dtype=torch.float32,
                 ),
             )
         )
@@ -338,6 +374,15 @@ def fake_deepeval():
 
 
 class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
+    def test_continuous_score_parser(self):
+        parse = concept_probs_continuous_actor.parse_unit_interval_score
+        self.assertEqual(parse("0"), 0.0)
+        self.assertEqual(parse("\n0.5\noptional explanation"), 0.5)
+        self.assertEqual(parse("1.0"), 1.0)
+        for invalid in ("", "score: 0.5", "-0.1", "1.1", "nan"):
+            with self.assertRaises(ValueError):
+                parse(invalid)
+
     async def test_all_generators(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -394,6 +439,19 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     layer_path=None, dim="gpu", max_gpus=1,
                 ))
                 self.assertTrue(any(behavior_out.rglob("*.npz")))
+
+                continuous_out = root / "behavior_continuous"
+                await generate_concept_probs_continuous.main_async(SimpleNamespace(
+                    models=[model_name], judge_model=model_name, steer_dir=str(steering),
+                    contexts_file=str(contexts), out_dir=str(continuous_out), layers=1,
+                    layer_path=None, dim="gpu", max_gpus=1, alpha_start=-1,
+                    alpha_end=1, alpha_steps=3, seed=0,
+                ))
+                continuous_path = next(continuous_out.rglob("*.npz"))
+                with np.load(continuous_path) as continuous_data:
+                    scores = continuous_data["completion_concept_scores_by_ctx"]
+                    self.assertTrue(np.all((0.0 <= scores) & (scores <= 1.0)))
+                    self.assertTrue(np.allclose(scores, 0.5))
 
                 log_out = root / "log_odds"
                 await generate_log_odds.main_async(SimpleNamespace(
