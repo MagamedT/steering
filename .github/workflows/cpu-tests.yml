@@ -2,6 +2,7 @@ name: CPU tests
 
 on:
   push:
+  workflow_dispatch:
 
 permissions:
   contents: read
