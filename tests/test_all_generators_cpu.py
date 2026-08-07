@@ -27,6 +27,7 @@ from transformers import (
 
 from actors import concept_probs_actor
 from actors import concept_probs_continuous_actor
+from actors import rubric_judge
 from actors import cross_entropy_actor
 from actors import log_odds_actor
 from actors import mmlu_actor
@@ -285,7 +286,7 @@ def cpu_only(model_path: Path):
             patch.object(
                 concept_probs_continuous_actor.BehaviorActor,
                 "_judge_completion_scores",
-                lambda _self, samples, concept, cfg: torch.full(
+                lambda _self, samples, concept, cfg, instruction=None: torch.full(
                     (len(samples),),
                     0.5,
                     dtype=torch.float32,
@@ -374,14 +375,13 @@ def fake_deepeval():
 
 
 class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
-    def test_continuous_score_parser(self):
-        parse = concept_probs_continuous_actor.parse_unit_interval_score
-        self.assertEqual(parse("0"), 0.0)
-        self.assertEqual(parse("\n0.5\noptional explanation"), 0.5)
-        self.assertEqual(parse("1.0"), 1.0)
-        for invalid in ("", "score: 0.5", "-0.1", "1.1", "nan"):
-            with self.assertRaises(ValueError):
-                parse(invalid)
+    def test_continuous_pair_probability(self):
+        pair = rubric_judge.pair_probability
+        self.assertAlmostEqual(pair(0.0, 0.0), 0.5)
+        self.assertAlmostEqual(pair(1.0986122886681098, 0.0), 0.75, places=6)
+        result = pair(torch.tensor([0.0, -1000.0]), torch.tensor([0.0, 1000.0]))
+        self.assertEqual(result.dtype, torch.float32)
+        torch.testing.assert_close(result, torch.tensor([0.5, 0.0]))
 
     async def test_all_generators(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -448,8 +448,11 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     alpha_end=1, alpha_steps=3, seed=0,
                 ))
                 continuous_path = next(continuous_out.rglob("*.npz"))
-                with np.load(continuous_path) as continuous_data:
+                with np.load(continuous_path, allow_pickle=True) as continuous_data:
                     scores = continuous_data["completion_concept_scores_by_ctx"]
+                    texts = continuous_data["completion_texts_by_ctx"]
+                    self.assertEqual(texts.shape, scores.shape)
+                    self.assertTrue(all(isinstance(text, str) for text in texts.flat))
                     self.assertTrue(np.all((0.0 <= scores) & (scores <= 1.0)))
                     self.assertTrue(np.allclose(scores, 0.5))
 

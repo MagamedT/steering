@@ -11,7 +11,7 @@
 set -euo pipefail
 
 CODE_ROOT="."
-EXP_ROOT="steering_run/data"  # root for all outputs
+EXP_ROOT="data/"  # root for all outputs
 export PYTHONPATH="$CODE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
@@ -23,8 +23,8 @@ MODELS=(
   # Qwen/Qwen3-8B
 )
 CONCEPTS=(joy evil)
-# MODEL_GENERATING_CONCEPT="google/gemma-3-12b-it"
-MODEL_GENERATING_CONCEPT="openai-community/gpt2"
+MODEL_GENERATING_CONCEPT="google/gemma-3-12b-it"
+# MODEL_GENERATING_CONCEPT="openai-community/gpt2"
 CONTEXTS_FILE="${CODE_ROOT}/data/contexts.jsonl"
 EVAL_PARQUET="/workspace/fineweb_eval_parquet/sample/10BT/000_00000.parquet" 
 
@@ -47,6 +47,7 @@ for SEED in "${SEEDS[@]}"; do
     --models "${MODELS[@]}" \
     --concepts "${CONCEPTS[@]}" \
     --out_dir "${PROMPTS_DIR}" \
+    --batch_size 25 \
     --seed "${SEED}"
 
   python3 "${CODE_ROOT}/experiments/generate_steering_vectors.py" \

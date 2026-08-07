@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -22,37 +21,15 @@ from .utils import (
     load_contexts_for_concept,
     load_model_and_tokenizer,
     load_steer_vector,
-    maybe_apply_chat_template,
     model_slug,
     set_left_padding,
 )
 
-
-_SCALAR_PATTERN = re.compile(
-    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$"
+from .rubric_judge import (
+    DEFAULT_CONCEPT_RUBRIC,
+    RubricJudgeDetails,
+    rubric_completion_scores,
 )
-
-
-def parse_unit_interval_score(text: str) -> float:
-    """Read one numeric score from the first nonblank output line."""
-    if not isinstance(text, str):
-        raise ValueError("Judge output must be text.")
-
-    first_line = next((line.strip() for line in text.splitlines() if line.strip()), None)
-    if first_line is None:
-        raise ValueError("Judge output does not contain a score.")
-    if _SCALAR_PATTERN.fullmatch(first_line) is None:
-        raise ValueError(
-            "The first nonblank judge-output line must contain only one numeric "
-            f"score, got {first_line!r}."
-        )
-
-    score = float(first_line)
-    if not math.isfinite(score):
-        raise ValueError(f"Judge score must be finite, got {first_line!r}.")
-    if not 0.0 <= score <= 1.0:
-        raise ValueError(f"Judge score must lie in [0, 1], got {score!r}.")
-    return score
 
 
 def mean_completion_score(scores: Sequence[float] | torch.Tensor) -> float:
@@ -94,21 +71,11 @@ class BehaviorConfig:
     top_p: float = 0.95
     generator_prompt_suffix: str = ""
 
-    judge_use_chat_template: bool = True
-    judge_system_prompt: str = ""
-    judge_question_template: str = (
-        "Evaluate how strongly the RESPONSE expresses the CONCEPT.\n\n"
-        "CONCEPT: {concept}\n\nRESPONSE:\n{completion}\n\n"
-        "Return a real-valued score from 0 to 1 inclusive. Use 0 when the "
-        "concept is absent, 1 when it is unmistakably expressed, and an "
-        "intermediate value for partial, indirect, or ambiguous evidence.\n"
-        "Your first nonblank output line must contain only the numeric score. "
-        "Do not put a label, markdown, or reasoning before the score."
-    )
     judge_max_prompt_length: int = 4000
     judge_batch_size: int = 16
     judge_max_new_tokens: int = 16
-    judge_max_completion_chars: int = 4000
+    judge_rubric_max_new_tokens: int = 512
+    judge_rubric_template: str = DEFAULT_CONCEPT_RUBRIC
 
     progress_every: int = 1
 
@@ -166,90 +133,31 @@ class BehaviorActor(Actor):
         samples: List[str],
         concept: str,
         cfg: BehaviorConfig,
+        instruction: str | None = None,
     ) -> torch.Tensor:
-        """Judge every completion independently and preserve its position."""
+        """Return sigmoid(z_true-z_false) for every completion."""
         assert self._judge_tok is not None and self._judge_model is not None
-        if not samples:
-            raise ValueError("At least one completion is required for judging.")
-        if cfg.judge_batch_size <= 0 or cfg.judge_max_new_tokens <= 0:
-            raise ValueError("Judge batch size and max-new-token count must be positive.")
-
-        prompts = []
-        for sample in samples:
-            completion = (sample or "")[: int(cfg.judge_max_completion_chars)]
-            user = cfg.judge_question_template.format(
-                concept=concept,
-                completion=completion,
-            )
-            prompts.append(
-                maybe_apply_chat_template(
-                    self._judge_tok,
-                    cfg.judge_system_prompt,
-                    user,
-                    cfg.judge_use_chat_template,
-                )
-            )
-
-        pad_id = self._judge_tok.pad_token_id
-        if pad_id is None:
-            pad_id = self._judge_tok.eos_token_id
-        if pad_id is None:
-            pad_id = self._judge_tok.bos_token_id
-        if pad_id is None:
-            raise ValueError("Judge tokenizer must define PAD, EOS, or BOS.")
-
-        gen_kwargs = {
-            "max_new_tokens": int(cfg.judge_max_new_tokens),
-            "do_sample": False,
-            "use_cache": True,
-            "pad_token_id": int(pad_id),
-        }
-        if self._judge_tok.eos_token_id is not None:
-            gen_kwargs["eos_token_id"] = int(self._judge_tok.eos_token_id)
-
-        scores: List[float] = []
-        result_device = torch.device("cuda")
-        amp_judge = torch.autocast(
-            device_type="cuda",
-            dtype=torch.bfloat16,
-            enabled=cfg.judge_dtype.lower() == "bfloat16",
+        details = rubric_completion_scores(
+            self._judge_tok,
+            self._judge_model,
+            samples,
+            concept,
+            cfg,
+            # Concept presence is a property of the generated continuation only.
+            # The source context must not affect the verdict.
+            instructions=None,
+            return_details=True,
         )
-        with torch.inference_mode(), amp_judge:
-            for start in range(0, len(prompts), int(cfg.judge_batch_size)):
-                prompt_batch = prompts[start : start + int(cfg.judge_batch_size)]
-                enc = self._judge_tok(
-                    prompt_batch,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=int(cfg.judge_max_prompt_length),
+        if not isinstance(details, RubricJudgeDetails):
+            raise RuntimeError("Rubric judge returned no scoring diagnostics.")
+        for row_index, raw_json in enumerate(details.raw_json):
+            parsed = json.loads(raw_json)
+            if tuple(parsed) != ("explanation_1", "criteria_met_1"):
+                raise ValueError(
+                    f"Rubric judge row {row_index} must contain exactly "
+                    "explanation_1 and criteria_met_1."
                 )
-                input_ids = enc["input_ids"].to("cuda", non_blocking=True)
-                result_device = input_ids.device
-                attention_mask = enc.get("attention_mask")
-                if attention_mask is None:
-                    attention_mask = torch.ones_like(input_ids, device=input_ids.device)
-                else:
-                    attention_mask = attention_mask.to(input_ids.device, non_blocking=True)
-
-                input_len = int(input_ids.shape[1])
-                out_ids = self._judge_model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    **gen_kwargs,
-                )
-                answers = self._judge_tok.batch_decode(
-                    out_ids[:, input_len:],
-                    skip_special_tokens=True,
-                )
-                if len(answers) != len(prompt_batch):
-                    raise RuntimeError(
-                        f"Judge returned {len(answers)} outputs for "
-                        f"{len(prompt_batch)} prompts."
-                    )
-                scores.extend(parse_unit_interval_score(answer) for answer in answers)
-
-        return torch.tensor(scores, device=result_device, dtype=torch.float32)
+        return details.scores
 
     def _generate_completions(
         self,
@@ -357,6 +265,7 @@ class BehaviorActor(Actor):
         layer_path: Optional[str] = None,
         cfg_dict: Optional[Dict[str, Any]] = None,
         rank_hint: int = 0,
+        exact_layer_idx: Optional[int] = None,
     ) -> Dict[str, Any]:
         cfg = BehaviorConfig(**(cfg_dict or {}))
         if not cfg.judge_model_name:
@@ -371,7 +280,14 @@ class BehaviorActor(Actor):
         assert self._gen_model is not None
 
         blocks = find_block_list(self._gen_model, override_path=layer_path)
-        if block_idx_to_steer is None:
+        if exact_layer_idx is not None:
+            exact_layer_idx = int(exact_layer_idx)
+            if not 0 <= exact_layer_idx < len(blocks):
+                raise ValueError(
+                    f"Layer {exact_layer_idx} is outside [0, {len(blocks) - 1}]."
+                )
+            layer_indices = [exact_layer_idx]
+        elif block_idx_to_steer is None:
             layer_indices = list(range(len(blocks)))
         else:
             layer_indices = np.linspace(
@@ -410,7 +326,15 @@ class BehaviorActor(Actor):
             steps=int(cfg.alpha_steps),
             dtype=torch.float32,
         )
-        if not bool((alphas == 0.0).any()):
+        near_zero = torch.isclose(
+            alphas,
+            torch.tensor(0.0, dtype=alphas.dtype),
+            atol=1e-6,
+            rtol=0.0,
+        )
+        if bool(near_zero.any()):
+            alphas[near_zero] = 0.0
+        else:
             alphas = torch.sort(
                 torch.cat([alphas, torch.tensor([0.0], dtype=torch.float32)])
             )[0]
@@ -445,6 +369,11 @@ class BehaviorActor(Actor):
                 np.nan,
                 dtype=np.float32,
             )
+            completion_texts_by_ctx = np.full(
+                (context_count, alpha_count, sample_count),
+                "",
+                dtype=object,
+            )
 
             for alpha_index, alpha in enumerate(alphas.tolist()):
                 handle = blocks[int(layer_idx)].register_forward_hook(
@@ -469,10 +398,21 @@ class BehaviorActor(Actor):
                         grouped = self._generate_completions(prompts, cfg)
                         context_means: List[float] = []
                         for offset, samples in enumerate(grouped):
+                            if len(samples) != sample_count:
+                                raise RuntimeError(
+                                    "Generator returned an unexpected number of "
+                                    "completions."
+                                )
+                            completion_texts_by_ctx[
+                                start + offset,
+                                alpha_index,
+                                :,
+                            ] = np.asarray(samples, dtype=object)
                             scores = self._judge_completion_scores(
                                 samples,
                                 concept=concept_label,
                                 cfg=cfg,
+                                instruction=context_batch[offset],
                             )
                             scores_cpu = scores.detach().to(
                                 device="cpu",
@@ -543,10 +483,12 @@ class BehaviorActor(Actor):
                 "n_contexts": context_count,
                 "n_samples_per_context": sample_count,
                 "judge": {
-                    "method": "generated_scalar",
+                    "method": "rubric_boolean_probability",
+                    "formula": "sigmoid(z_true - z_false)",
                     "range": [0.0, 1.0],
                     "batch_size": int(cfg.judge_batch_size),
-                    "max_new_tokens": int(cfg.judge_max_new_tokens),
+                    "max_new_tokens": int(cfg.judge_rubric_max_new_tokens),
+                    "rubric_template": cfg.judge_rubric_template,
                     "aggregation": "arithmetic mean over completion scores",
                 },
                 "contexts_file": str(contexts_file),
@@ -557,6 +499,7 @@ class BehaviorActor(Actor):
                 concept_scores_by_ctx=concept_scores_by_ctx,
                 p1_by_ctx=concept_scores_by_ctx,
                 completion_concept_scores_by_ctx=completion_scores_by_ctx,
+                completion_texts_by_ctx=completion_texts_by_ctx,
                 ctx_texts=np.array(contexts, dtype=object),
                 ctx_source_lines=np.array(context_source_lines, dtype=np.int32),
                 ctx_is_positive=ctx_is_positive,

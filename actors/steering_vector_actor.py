@@ -83,6 +83,7 @@ class SteeringActor(Actor):
         # Load model/tokenizer
         self._ensure_model(model_name, cfg.dtype)
         tokenizer, model = self.tokenizer, self.model
+        activation_model = getattr(model, "base_model", model)
         # Prefer text_config.hidden_size if it exists, for multimodal LLM you need to check text_config.
         model_config = model.config
         text_cfg = getattr(model_config, "text_config", None)
@@ -182,8 +183,9 @@ class SteeringActor(Actor):
                     attn_mask = tokenized_prompts["attention_mask"].to("cuda", non_blocking=True)
                     current_mask = attn_mask
                     current_token_count = attn_mask.sum(dim = 1)
-                    # model inference to record the activations, we save the logits in _ for the GC of python
-                    _ = model(input_ids=input_ids, attention_mask=attn_mask)
+                    # Run the transformer body directly: hooks still fire, while the
+                    # large full-vocabulary logits tensor is never materialized.
+                    _ = activation_model(input_ids=input_ids, attention_mask=attn_mask)
                     # every now and then, let the process sleep to let the GPU communicate with Monarch internals
                     if step % progress_every == 0:
                         await asyncio.sleep(0)
@@ -198,7 +200,7 @@ class SteeringActor(Actor):
                     attn_mask = tokenized_prompts["attention_mask"].to("cuda", non_blocking=True)
                     current_mask = attn_mask
                     current_token_count = attn_mask.sum(dim = 1)
-                    _ = model(input_ids=input_ids, attention_mask=attn_mask)
+                    _ = activation_model(input_ids=input_ids, attention_mask=attn_mask)
                     if step % progress_every == 0:
                         await asyncio.sleep(0)
             # final normalization for this batch of decoder blocks by the amount of prompts batches    

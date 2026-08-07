@@ -18,6 +18,12 @@ async def main_async(args):
         alpha_end=args.alpha_end,
         alpha_steps=args.alpha_steps,
         seed=args.seed,
+        normalize=bool(getattr(args, "normalize", False)),
+        n_samples_per_context=getattr(args, "samples_per_context", 12),
+        gen_context_batch_size=getattr(args, "context_batch_size", 12),
+        max_new_tokens=getattr(args, "max_new_tokens", 100),
+        judge_batch_size=getattr(args, "judge_batch_size", 16),
+        judge_rubric_max_new_tokens=getattr(args, "judge_max_new_tokens", 512),
     )
 
     steer_dir = Path(args.steer_dir)
@@ -65,6 +71,7 @@ async def main_async(args):
             layer_path=args.layer_path,
             cfg_dict=asdict(cfg),
             rank_hint=rank,
+            exact_layer_idx=getattr(args, "layer", None),
         )
 
     async for rank, result in run_ranked_jobs(jobs, use_gpus, run_one):
@@ -97,8 +104,8 @@ def parse_args():
         "--judge_model",
         required=True,
         help=(
-            "Judge model that scores each completion from 0 to 1; scores are "
-            "averaged per context."
+            "Rubric judge whose true/false logits score each completion with "
+            "sigmoid(z_true-z_false); scores are averaged per context."
         ),
     )
     parser.add_argument("--steer_dir", default="steering_vectors")
@@ -108,11 +115,27 @@ def parse_args():
     parser.add_argument("--alpha_end", type=float, default=40.0)
     parser.add_argument("--alpha_steps", type=int, default=41)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--samples_per_context", type=int, default=12)
+    parser.add_argument("--context_batch_size", type=int, default=12)
+    parser.add_argument("--max_new_tokens", type=int, default=100)
+    parser.add_argument("--judge_batch_size", type=int, default=16)
+    parser.add_argument("--judge_max_new_tokens", type=int, default=512)
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="Normalize each steering vector to unit norm before applying alpha.",
+    )
     parser.add_argument(
         "--layers",
         type=int,
         default=4,
         help="0 means all layers; a positive value samples that many layers.",
+    )
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=None,
+        help="Run one exact layer; overrides --layers.",
     )
     parser.add_argument("--layer_path", default=None)
     parser.add_argument("--dim", default="gpu")
