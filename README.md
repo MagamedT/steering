@@ -119,6 +119,20 @@ python experiments/generate_steering_vectors.py \
   --save_dir steering_vectors
 ```
 
+The default remains one model replica per GPU actor. For models that do not
+fit on one GPU, opt into the experimental automatic model-parallel planner:
+
+```bash
+python experiments/generate_steering_vectors.py \
+  --models google/gemma-3-27b-it \
+  --in_dir prompts \
+  --save_dir steering_vectors \
+  --model_parallel_size auto
+```
+
+See [experimental dynamic model parallelism](docs/experimental/dynamic_model_parallelism.md)
+for planning controls, topology, and current constraints.
+
 ### 3) Probability curves vs alpha
 
 This command sweeps steering strength and saves next-token probability curves.

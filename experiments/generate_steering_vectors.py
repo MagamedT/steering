@@ -38,10 +38,28 @@ def pair_jobs(models, concepts, mode="product"):
     return jobs
 
 async def main_async(args):
-    cfg = SteeringConfig(
-        seed=args.seed,
-        contrastive=args.contrastive,
-    )
+    if getattr(args, "model_parallel_size", "1") == "auto":
+        from experiments.dynamic_steering_vectors import run_dynamic
+
+        await run_dynamic(args)
+        return
+
+    cfg_values = {
+        "seed": args.seed,
+        "contrastive": args.contrastive,
+    }
+    for name in (
+        "batch_size",
+        "max_length",
+        "dtype",
+        "n_positive",
+        "n_negative",
+        "block_per_pass",
+        "progress_every",
+    ):
+        if hasattr(args, name):
+            cfg_values[name] = getattr(args, name)
+    cfg = SteeringConfig(**cfg_values)
 
     in_dir = Path(args.in_dir)
     if not in_dir.exists():
@@ -118,13 +136,52 @@ def parse_args():
                    help="Mesh dimension name (use 'gpu' if your env shows that).")
     p.add_argument("--max_gpus", type=int, default=0,
                    help="Limit number of GPUs to use on this host (0 = all visible).")
+    p.add_argument(
+        "--model_parallel_size",
+        choices=("1", "auto"),
+        default="1",
+        help=(
+            "Model GPUs per logical actor. The default '1' preserves the existing "
+            "one-GPU actor path; 'auto' enables experimental dynamic model parallelism."
+        ),
+    )
 
     # Tokenization / compute knobs
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
+        "--dtype",
+        choices=("bfloat16", "float16", "float32"),
+        default=SteeringConfig.dtype,
+    )
+    p.add_argument("--batch_size", type=int, default=SteeringConfig.batch_size)
+    p.add_argument("--max_length", type=int, default=SteeringConfig.max_length)
+    p.add_argument("--block_per_pass", type=int, default=SteeringConfig.block_per_pass)
+    p.add_argument("--progress_every", type=int, default=SteeringConfig.progress_every)
+    p.add_argument("--n_positive", type=int, default=None)
+    p.add_argument("--n_negative", type=int, default=None)
+    p.add_argument(
         "--contrastive",
         action="store_true",
         help="Read <concept>_negative.jsonl contrastive prompt files.",
+    )
+    p.add_argument(
+        "--gpu_utilization",
+        type=float,
+        default=0.90,
+        help="Experimental auto-planner fraction of currently free VRAM to use.",
+    )
+    p.add_argument(
+        "--inference_headroom",
+        type=float,
+        default=1.20,
+        help="Experimental auto-planner multiplier over estimated model weight memory.",
+    )
+    p.add_argument("--local_files_only", action="store_true")
+    p.add_argument("--trust_remote_code", action="store_true")
+    p.add_argument(
+        "--plan_only",
+        action="store_true",
+        help="With --model_parallel_size auto, print the topology without loading weights.",
     )
     return p.parse_args()
 
