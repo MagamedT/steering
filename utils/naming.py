@@ -1,3 +1,5 @@
+"""Create stable names for concepts and models."""
+
 from __future__ import annotations
 
 import re
@@ -9,4 +11,5 @@ def slugify(value: str) -> str:
 
 
 def model_slug(model_name: str) -> str:
+    """Create a stable directory name for a model."""
     return slugify(model_name.replace("/", "-"))

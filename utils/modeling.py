@@ -1,3 +1,5 @@
+"""Find model layers and prepare tokenizers and steering vectors."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -56,6 +58,7 @@ def load_steering_vector(
     concept_slug: str,
     layer_idx: int,
 ) -> torch.Tensor:
+    """Load one steering vector from disk onto CPU."""
     path = steer_dir / model_slug(model_name) / concept_slug / f"layer_{layer_idx}.pt"
     payload = torch.load(path, map_location="cpu")
     vector = payload["steering_vector"]
@@ -91,6 +94,7 @@ def ensure_pad_token(tokenizer, model=None) -> None:
 def maybe_apply_chat_template(
     tokenizer, system: str, user: str, use_chat: bool
 ) -> str:
+    """Format a judge prompt with the chat template when available."""
     if use_chat and getattr(tokenizer, "chat_template", None):
         messages = [
             {"role": "system", "content": system},
@@ -103,6 +107,7 @@ def maybe_apply_chat_template(
 
 
 def one_token_ids(tokenizer, variants: list[str]) -> list[int]:
+    """Return variants that encode to exactly one token."""
     ids: list[int] = []
     for variant in variants:
         try:

@@ -1,14 +1,17 @@
+"""Command-line entry point for steering-vector extraction."""
+
 import argparse
 import asyncio
 
 from monarch.actor import shutdown_context
 
 from actors.tasks.steering import SteeringConfig
-from steering.runtime.pool import add_distributed_args
+from utils.runtime.pool import add_distributed_args
 from experiments.runners import run_steering
 
 
 def pair_jobs(models, concepts, mode="product"):
+    """Pair models and concepts using the requested rule."""
     if mode == "product":
         return [
             (model, slug, label)
@@ -28,10 +31,12 @@ def pair_jobs(models, concepts, mode="product"):
 
 
 async def main_async(args):
+    """Run the experiment from parsed command-line arguments."""
     await run_steering(args)
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--in_dir", default="prompts")

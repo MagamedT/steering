@@ -1,3 +1,5 @@
+"""Measure how steering changes model cross-entropy."""
+
 import json
 from pathlib import Path
 from dataclasses import dataclass
@@ -10,15 +12,17 @@ import torch
 import torch.nn.functional as F
 from monarch.actor import Actor, endpoint
 
-from steering.data import iter_eval_blocks_from_parquet
-from steering.modeling import find_block_list, load_steering_vector
-from steering.naming import model_slug
+from utils.data import iter_eval_blocks_from_parquet
+from utils.modeling import find_block_list, load_steering_vector
+from utils.naming import model_slug
 from .next_token_probs import ensure_full_vocab_logits
 
 
 @dataclass
 class CrossEntropyPlotConfig:
-    # compute / reproducibility
+    """Settings for cross-entropy evaluation."""
+
+    # Compute and reproducibility
     dtype: str = "float32"
     seed: int = 42
 
@@ -43,12 +47,13 @@ class CrossEntropyPlotConfig:
     apply_last_token_only: bool = False
 
     # cooperative scheduling
-    progress_every: int = 10       # mailbox yield every N forwards
+    progress_every: int = 10       # yield every N forward passes
 
 class CrossEntropyActor(Actor):
-    """Cross-entropy endpoints used by the distributed actor."""
+    """Compute cross-entropy curves for a loaded model."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
+        """Check that the requested model is already loaded."""
         if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
         raise RuntimeError("Distributed actor was initialized for a different model")
@@ -66,7 +71,9 @@ class CrossEntropyActor(Actor):
         layer_path: Optional[str] = None,
         cfg_dict: Optional[dict] = None,
         rank_hint: int = 0,
+        exact_layer_idx: Optional[int] = None,
     ):
+        """Compute and save cross-entropy curves for selected layers."""
         cfg = CrossEntropyPlotConfig(**(cfg_dict or {}))
         torch.manual_seed(cfg.seed + int(rank_hint))
         if torch.cuda.is_available():
@@ -79,7 +86,14 @@ class CrossEntropyActor(Actor):
         device = getattr(self, "device", next(model.parameters()).device)
         blocks = find_block_list(model, override_path=layer_path)
         n_blocks = len(blocks)
-        if block_idx_to_steer == None:
+        if exact_layer_idx is not None:
+            exact_layer_idx = int(exact_layer_idx)
+            if not 0 <= exact_layer_idx < n_blocks:
+                raise ValueError(
+                    f"Layer {exact_layer_idx} is outside [0, {n_blocks - 1}]."
+                )
+            block_idx_to_steer = [exact_layer_idx]
+        elif block_idx_to_steer is None:
             block_idx_to_steer = list(range(n_blocks))
         else:
             # Interpret integer input as "sample this many layers uniformly across depth".
@@ -174,7 +188,7 @@ class CrossEntropyActor(Actor):
                     )
 
                     with torch.inference_mode():
-                        # IMPORTANT: use_cache=False and no attention_mask (no padding).
+                        # Disable the cache; these token blocks contain no padding.
                         logits = ensure_full_vocab_logits(
                             model(input_ids=input_rep, use_cache=False).logits,
                             int(model.config.vocab_size),

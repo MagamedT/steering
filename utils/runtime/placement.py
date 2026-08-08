@@ -1,3 +1,5 @@
+"""Estimate model memory and choose a safe GPU layout."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -16,6 +18,7 @@ _DTYPES = {
 
 @dataclass(frozen=True)
 class GpuMemory:
+    """Free and total memory for one visible GPU."""
     index: int
     free_bytes: int
     total_bytes: int
@@ -23,6 +26,7 @@ class GpuMemory:
 
 @dataclass(frozen=True)
 class ModelEstimate:
+    """Estimated model size and supported parallel layouts."""
     model_name: str
     dtype: str
     weight_bytes: int
@@ -33,6 +37,7 @@ class ModelEstimate:
 
 @dataclass(frozen=True)
 class ActorPlan:
+    """GPU and worker counts chosen for one run."""
     model_name: str
     dtype: str
     weight_bytes: int
@@ -46,10 +51,12 @@ class ActorPlan:
     tensor_parallel: bool
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the plan as a plain dictionary."""
         return asdict(self)
 
 
 def dtype_from_name(dtype: str) -> torch.dtype:
+    """Map a command-line dtype name to a PyTorch dtype."""
     try:
         return _DTYPES[dtype]
     except KeyError as exc:
@@ -58,6 +65,7 @@ def dtype_from_name(dtype: str) -> torch.dtype:
 
 
 def discover_gpu_memory(max_gpus: int = 0) -> list[GpuMemory]:
+    """Read free and total memory for visible GPUs."""
     visible = torch.cuda.device_count()
     if max_gpus > 0:
         visible = min(visible, max_gpus)
@@ -76,6 +84,7 @@ def discover_gpu_memory(max_gpus: int = 0) -> list[GpuMemory]:
 
 
 def _positive_ints(values: Iterable[Any]) -> tuple[int, ...]:
+    """Keep only positive integer values."""
     result = []
     for value in values:
         if isinstance(value, int) and value > 0:
@@ -84,7 +93,7 @@ def _positive_ints(values: Iterable[Any]) -> tuple[int, ...]:
 
 
 def _tp_divisors(config: Any, max_size: int) -> tuple[int, ...]:
-    """Return conservative TP sizes that evenly shard common transformer widths."""
+    """Return tensor-parallel sizes that divide each model width."""
     text_config = getattr(config, "text_config", config)
     dimensions = _positive_ints(
         getattr(text_config, name, None)
@@ -112,7 +121,7 @@ def estimate_model(
     local_files_only: bool = False,
     trust_remote_code: bool = False,
 ) -> ModelEstimate:
-    """Build a meta-device skeleton and estimate weight memory without loading weights."""
+    """Estimate model weight memory without loading the weights."""
     from accelerate import init_empty_weights
     from accelerate.utils import calculate_maximum_sizes
     from transformers import AutoConfig, AutoModelForCausalLM
@@ -154,7 +163,7 @@ def plan_actor_mesh(
     gpu_utilization: float = 0.90,
     inference_headroom: float = 1.20,
 ) -> ActorPlan:
-    """Choose the smallest safe TP group and pack logical actors onto visible GPUs."""
+    """Choose GPUs per model and how many models can run at once."""
     if not gpu_memory:
         raise RuntimeError("No CUDA devices are available to the model-placement planner.")
     if desired_actors < 1:
@@ -194,14 +203,14 @@ def plan_actor_mesh(
         if not valid_sizes:
             raise RuntimeError(
                 f"{estimate.model_name!r} needs at least {minimum_size} GPUs per "
-                f"logical actor, but no compatible TP size fits in {len(gpu_memory)} GPUs."
+                f"model copy, but no compatible TP size fits in {len(gpu_memory)} GPUs."
             )
         gpus_per_actor = min(valid_sizes)
 
     logical_actors = min(desired_actors, len(gpu_memory) // gpus_per_actor)
     if logical_actors < 1:
         raise RuntimeError(
-            f"Need {gpus_per_actor} GPUs for one logical actor, but only "
+            f"Need {gpus_per_actor} GPUs for one model copy, but only "
             f"{len(gpu_memory)} are available."
         )
     return ActorPlan(
@@ -220,7 +229,7 @@ def plan_actor_mesh(
 
 
 def combine_model_estimates(estimates: Sequence[ModelEstimate]) -> ModelEstimate:
-    """Combine models that will coexist on one logical actor."""
+    """Combine memory estimates for models loaded together."""
     if not estimates:
         raise ValueError("At least one model estimate is required")
     common_divisors = set(estimates[0].tensor_parallel_divisors)
@@ -247,7 +256,7 @@ def plan_single_gpu_actors(
     *,
     desired_actors: int,
 ) -> ActorPlan:
-    """Pack explicit one-GPU logical actors without estimating model weights."""
+    """Use one GPU for each running model without estimating memory."""
     if not gpu_memory:
         raise RuntimeError("No CUDA devices are available to the actor planner.")
     if desired_actors < 1:
@@ -269,4 +278,5 @@ def plan_single_gpu_actors(
 
 
 def format_bytes(value: int) -> str:
+    """Format bytes as gibibytes."""
     return f"{value / (1024**3):.2f} GiB"

@@ -1,4 +1,4 @@
-"""Boolean-probability scoring for the RubricARROW pointwise judge."""
+"""Score whether generated text expresses a concept."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ _VERDICT_RE = re.compile(
 
 @dataclass(frozen=True)
 class RubricJudgeDetails:
-    """Ordered completion scores plus auditable verdict diagnostics."""
+    """Scores and details from the judge output."""
 
     scores: torch.Tensor
     raw_json: tuple[str, ...]
@@ -64,6 +64,7 @@ class RubricJudgeDetails:
 
 @dataclass(frozen=True)
 class _BooleanTokenPair:
+    """Token IDs for the judge answers true and false."""
     true_text: str
     false_text: str
     true_id: int
@@ -72,6 +73,7 @@ class _BooleanTokenPair:
 
 @dataclass(frozen=True)
 class _ParsedVerdict:
+    """A parsed judge answer and its token position."""
     raw_json: str
     criteria_met: bool
     verdict_position: int
@@ -83,7 +85,7 @@ def pair_probability(
     true_logit: float | torch.Tensor,
     false_logit: float | torch.Tensor,
 ) -> float | torch.Tensor:
-    """Return sigmoid(z_true-z_false), evaluated stably in float32."""
+    """Convert true and false logits into a probability."""
 
     tensor_input = torch.is_tensor(true_logit) or torch.is_tensor(false_logit)
     if torch.is_tensor(true_logit):
@@ -116,7 +118,7 @@ def build_rubric_judge_prompt(
     completion: str,
     rubric: str,
 ) -> str:
-    """Render the user-only, no-thinking, single-item judge prompt."""
+    """Build the prompt used to judge one completion."""
 
     instruction = "" if instruction is None else str(instruction)
     completion = "" if completion is None else str(completion)
@@ -138,6 +140,7 @@ def build_rubric_judge_prompt(
 
 
 def _encode_no_special(tokenizer, text: str) -> list[int]:
+    """Encode text without adding tokenizer control tokens."""
     if hasattr(tokenizer, "encode"):
         ids = tokenizer.encode(text, add_special_tokens=False)
     else:
@@ -150,6 +153,7 @@ def _encode_no_special(tokenizer, text: str) -> list[int]:
 
 
 def _resolve_boolean_token_pairs(tokenizer) -> tuple[_BooleanTokenPair, ...]:
+    """Find single-token forms of true and false."""
     pairs: list[_BooleanTokenPair] = []
     for true_text, false_text in ((" true", " false"), ("true", "false")):
         true_ids = _encode_no_special(tokenizer, true_text)
@@ -179,6 +183,7 @@ def _resolve_boolean_token_pairs(tokenizer) -> tuple[_BooleanTokenPair, ...]:
 
 
 def _decode(tokenizer, ids: Sequence[int]) -> str:
+    """Decode token IDs into text."""
     try:
         return tokenizer.decode(
             [int(value) for value in ids],
@@ -196,6 +201,7 @@ def _parse_generated_verdict(
     generated_ids: Sequence[int],
     token_pairs: Sequence[_BooleanTokenPair],
 ) -> _ParsedVerdict:
+    """Parse and validate one JSON judge answer."""
     ids = [int(value) for value in generated_ids]
     raw = _decode(tokenizer, ids).strip()
     try:
@@ -265,6 +271,7 @@ def _parse_generated_verdict(
 
 
 def _pad_id(tokenizer) -> int:
+    """Choose a token ID to use for padding."""
     for value in (
         getattr(tokenizer, "pad_token_id", None),
         getattr(tokenizer, "eos_token_id", None),
@@ -276,6 +283,7 @@ def _pad_id(tokenizer) -> int:
 
 
 def _model_device(model) -> torch.device:
+    """Return the device used by the judge model."""
     device = getattr(model, "device", None)
     if device is not None and str(device) != "meta":
         return torch.device(device)
@@ -286,6 +294,7 @@ def _model_device(model) -> torch.device:
 
 
 def _amp_context(device: torch.device, judge_dtype: str):
+    """Enable mixed precision only when the device supports it."""
     if device.type == "cuda" and judge_dtype == "bfloat16":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return nullcontext()
@@ -302,13 +311,7 @@ def rubric_completion_scores(
     return_details: bool = False,
     tp_mesh=None,
 ) -> torch.Tensor | RubricJudgeDetails:
-    """Score each completion at its generated RubricARROW verdict position.
-
-    The first pass greedily emits the checkpoint's trained explanation-first
-    JSON.  The second pass ends immediately before its Boolean token and keeps
-    only the final-position logits, from which the requested pair-normalized
-    probability is computed.
-    """
+    """Score every completion for concept presence."""
 
     samples = ["" if sample is None else str(sample) for sample in samples]
     if not samples:

@@ -1,3 +1,5 @@
+"""Measure how steering changes next-token probabilities."""
+
 import json
 from pathlib import Path
 from dataclasses import dataclass
@@ -10,13 +12,13 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from monarch.actor import Actor, endpoint
 
-from steering.data import load_contexts_for_concept
-from steering.modeling import find_block_list, load_steering_vector
-from steering.naming import model_slug
+from utils.data import load_contexts_for_concept
+from utils.modeling import find_block_list, load_steering_vector
+from utils.naming import model_slug
 
 
 def ensure_full_vocab_logits(logits, expected_vocab_size: int, tp_mesh=None):
-    """Materialize full-vocabulary logits when a model shards its LM head."""
+    """Gather sharded logits so every token is present."""
     if isinstance(logits, DTensor):
         logits = logits.full_tensor()
     if logits.shape[-1] == expected_vocab_size:
@@ -38,12 +40,9 @@ def ensure_full_vocab_logits(logits, expected_vocab_size: int, tp_mesh=None):
     return torch.cat(gathered, dim=-1)
 
 
-# -----------------------------
-# Actor config (sent as dict)
-# -----------------------------
-
 @dataclass
 class TokenPlotConfig:
+    """Settings for next-token probability curves."""
     dtype: str = "float32"
     seed: int = 42
     batch_size: int = 256
@@ -57,14 +56,11 @@ class TokenPlotConfig:
     progress_every: int = 5
 
 
-# -----------------------------
-# Actor (one GPU)
-# -----------------------------
-
 class TokenActor(Actor):
-    """Next-token probability endpoints used by the distributed actor."""
+    """Compute next-token probability curves for a loaded model."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
+        """Check that the requested model is already loaded."""
         if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
         raise RuntimeError("Distributed actor was initialized for a different model")
@@ -84,6 +80,7 @@ class TokenActor(Actor):
         rank_hint=0,      # int
         context_indices=None,  # optional list[int] for replica-level sharding
     ):
+        """Compute and save token-probability curves for selected contexts."""
         cfg = TokenPlotConfig(**(cfg_dict or {}))
         torch.manual_seed(cfg.seed + int(rank_hint))
         if torch.cuda.is_available():
@@ -264,7 +261,7 @@ class TokenActor(Actor):
                 )
 
                 if (work_idx % progress_mod) == 0:
-                    # Let the actor service its mailbox during long loops
+                    # Yield so other actor calls can run.
                     await asyncio.sleep(0)
 
         torch.cuda.empty_cache()

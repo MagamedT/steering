@@ -1,3 +1,5 @@
+"""Command-line entry point for MMLU evaluation."""
+
 import os
 
 os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
@@ -15,16 +17,25 @@ from pathlib import Path
 from monarch.actor import shutdown_context
 
 from actors.tasks.mmlu import MMLUEvalConfig
-from steering.data import discover_steering_jobs
-from steering.runtime.pool import add_distributed_args
+from utils.data import discover_steering_jobs
+from utils.runtime.pool import add_distributed_args
 from experiments.runners import run_mmlu
 
 
 async def main_async(args):
+    """Run the experiment from parsed command-line arguments."""
     tasks = args.tasks
     if tasks and len(tasks) == 1 and tasks[0].lower() == "all":
         tasks = None
-    config = MMLUEvalConfig(dtype=args.dtype, seed=args.seed, tasks=tasks)
+    max_problems = getattr(args, "max_problems_per_task", None)
+    if max_problems is not None and max_problems < 1:
+        raise ValueError("--max_problems_per_task must be positive")
+    config = MMLUEvalConfig(
+        dtype=args.dtype,
+        seed=args.seed,
+        tasks=tasks,
+        max_problems_per_task=max_problems,
+    )
     steer_dir = Path(args.steer_dir)
     out_dir = Path(args.out_dir)
     if not steer_dir.exists():
@@ -36,12 +47,15 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--steer_dir", default="steering_vectors")
     parser.add_argument("--out_dir", default="mmlu")
     parser.add_argument("--tasks", nargs="+", default=None)
+    parser.add_argument("--max_problems_per_task", type=int, default=None)
     parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--layer", type=int, default=None)
     parser.add_argument("--layer_path", default=None)
     parser.add_argument("--seed", type=int, default=42)
     add_distributed_args(parser, default_dtype=MMLUEvalConfig.dtype)

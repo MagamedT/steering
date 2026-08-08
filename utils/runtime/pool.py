@@ -1,3 +1,5 @@
+"""Start model workers and send them experiment jobs."""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -21,16 +23,19 @@ from .placement import (
 
 @dataclass(frozen=True)
 class ModelSpec:
+    """Model name and dtype used by the placement planner."""
     name: str
     dtype: str
 
 
 def group_bounds(logical_rank: int, gpus_per_actor: int) -> tuple[int, int]:
+    """Return the GPU-worker range for one model copy."""
     start = logical_rank * gpus_per_actor
     return start, start + gpus_per_actor
 
 
 def leader_result(value_mesh):
+    """Return the single result produced by the group leader."""
     results = [value for _point, value in value_mesh.items() if value is not None]
     if len(results) != 1:
         raise RuntimeError(
@@ -45,6 +50,7 @@ def plan_models(
     *,
     desired_actors: int,
 ) -> ActorPlan:
+    """Choose a GPU layout for the requested models."""
     if not model_specs:
         raise ValueError("At least one model is required")
     gpu_memory = discover_gpu_memory(getattr(args, "max_gpus", 0))
@@ -88,6 +94,7 @@ def print_plan(
     models: Sequence[ModelSpec],
     **metadata: Any,
 ) -> None:
+    """Print the chosen layout and job details."""
     payload = plan.to_dict()
     payload.update(
         stage=stage,
@@ -102,23 +109,26 @@ def print_plan(
         else ""
     )
     print(
-        f"{stage} plan: {plan.logical_actors} logical actor(s) x "
+        f"{stage} plan: {plan.logical_actors} model worker(s) x "
         f"{plan.gpus_per_actor} GPU(s){details}",
         flush=True,
     )
 
 
 class LogicalActorPool:
+    """Group the GPU workers that hold one model copy."""
     def __init__(self, actors, dim: str, plan: ActorPlan) -> None:
         self.actors = actors
         self.dim = dim
         self.plan = plan
 
     def group(self, logical_rank: int):
+        """Return the workers that hold one model copy."""
         start, stop = group_bounds(logical_rank, self.plan.gpus_per_actor)
         return self.actors.slice(**{self.dim: slice(start, stop)})
 
     async def call(self, logical_rank: int, endpoint_name: str, *args, **kwargs):
+        """Run one task on a model copy and return its result."""
         endpoint = getattr(self.group(logical_rank), endpoint_name)
         values = await endpoint.call(*args, **kwargs)
         return leader_result(values)
@@ -126,6 +136,7 @@ class LogicalActorPool:
 
 @asynccontextmanager
 async def actor_pool(args, plan: ActorPlan, name: str, actor_cls, *actor_args):
+    """Start model workers and stop them after the run."""
     mesh = this_host().spawn_procs(per_host={getattr(args, "dim", "gpu"): plan.total_gpus})
     print(mesh.to_table(), flush=True)
     actors = None
@@ -140,6 +151,7 @@ async def actor_pool(args, plan: ActorPlan, name: str, actor_cls, *actor_args):
 
 
 def add_distributed_args(parser, *, default_dtype: str = "bfloat16") -> None:
+    """Add shared model-placement options to a parser."""
     parser.add_argument("--dim", default="gpu", help="Monarch process-mesh dimension.")
     parser.add_argument(
         "--max_gpus", type=int, default=0, help="Maximum visible GPUs to use (0=all)."
@@ -149,8 +161,8 @@ def add_distributed_args(parser, *, default_dtype: str = "bfloat16") -> None:
         choices=("1", "auto"),
         default="auto",
         help=(
-            "GPUs per logical actor: '1' uses one rank; 'auto' chooses a safe "
-            "tensor-parallel group and packs replicas onto the remaining GPUs."
+            "GPUs per running model: '1' uses one GPU; 'auto' chooses a safe "
+            "GPU group and runs extra model copies on the remaining GPUs."
         ),
     )
     parser.add_argument(
@@ -165,5 +177,5 @@ def add_distributed_args(parser, *, default_dtype: str = "bfloat16") -> None:
     parser.add_argument(
         "--plan_only",
         action="store_true",
-        help="Print the planned topology without loading model weights.",
+        help="Print the planned GPU layout without loading model weights.",
     )

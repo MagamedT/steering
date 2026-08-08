@@ -1,11 +1,13 @@
+"""Assign experiment jobs to the available model workers."""
+
 from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
 
 from actors import (
-    DistributedBehaviorActor,
-    DistributedContinuousBehaviorActor,
+    DistributedConceptProbsActor,
+    DistributedContinuousConceptProbsActor,
     DistributedCrossEntropyActor,
     DistributedLogOddsActor,
     DistributedMMLUActor,
@@ -15,17 +17,18 @@ from actors import (
     DistributedTokenActor,
     SteeringConfig,
 )
-from steering.data import discover_concepts, load_contexts_for_concept
-from steering.runtime.pool import (
+from utils.data import discover_concepts, load_contexts_for_concept
+from utils.runtime.pool import (
     ModelSpec,
     actor_pool,
     plan_models,
     print_plan,
 )
-from steering.runtime.scheduler import run_ranked_jobs
+from utils.runtime.scheduler import run_ranked_jobs
 
 
 def prompt_phases(args) -> list[tuple[str, str, str | None]]:
+    """Choose the model and mode for each prompt-generation phase."""
     if args.contrastive:
         return [(args.model_generating_concept, "both", None)]
     if not args.models:
@@ -37,16 +40,14 @@ def prompt_phases(args) -> list[tuple[str, str, str | None]]:
 
 
 def prompt_phase_jobs(concepts: list[str], mode: str) -> list[tuple[str, str]]:
+    """Build concept jobs for one prompt-generation phase."""
     if mode == "both":
-        return [
-            (concept, job_mode)
-            for concept in concepts
-            for job_mode in ("related", "unrelated")
-        ]
+        return [(concept, "both") for concept in concepts]
     return [(concept, mode) for concept in concepts]
 
 
 def plot_work_items(model_jobs, contexts_file, layers):
+    """Split token plots into one job per context and layer."""
     requested_layers = [None] if layers == [None] else [int(index) for index in layers]
     work_items = []
     for model_name, concept_slug, concept_label in model_jobs:
@@ -64,6 +65,7 @@ def plot_work_items(model_jobs, contexts_file, layers):
 
 
 def _single_model_actor_args(args, plan, model_name: str):
+    """Build common constructor arguments for one-model actors."""
     return (
         model_name,
         args.dtype,
@@ -75,6 +77,7 @@ def _single_model_actor_args(args, plan, model_name: str):
 
 
 async def run_prompts(args, cfg) -> None:
+    """Plan and run prompt-generation jobs."""
     concepts = list(args.concepts)
     if not concepts:
         raise ValueError("At least one concept is required")
@@ -125,6 +128,7 @@ async def run_prompts(args, cfg) -> None:
 
 
 async def run_steering(args) -> None:
+    """Plan and run steering-vector jobs."""
     prompt_root = Path(args.in_dir)
     if not prompt_root.exists():
         raise RuntimeError(f"--in_dir {str(prompt_root)!r} does not exist")
@@ -198,6 +202,7 @@ async def run_steering(args) -> None:
 
 
 async def run_next_token_probs(args, cfg, jobs, steer_dir, out_dir, contexts_file):
+    """Plan and run next-token probability jobs."""
     for model_index, model_name in enumerate(dict.fromkeys(args.models)):
         model_jobs = [job for job in jobs if job[0] == model_name]
         work_items = plot_work_items(model_jobs, contexts_file, args.layers)
@@ -264,6 +269,7 @@ async def _run_single_model_jobs(
     invoke,
     continue_on_error=False,
 ):
+    """Run independent jobs that share one loaded model."""
     for model_index, model_name in enumerate(dict.fromkeys(args.models)):
         model_jobs = [job[1:] for job in jobs if job[0] == model_name]
         if not model_jobs:
@@ -304,6 +310,7 @@ async def _run_single_model_jobs(
 
 
 async def run_cross_entropy(args, cfg, jobs, steer_dir, out_dir, eval_parquet):
+    """Plan and run cross-entropy jobs."""
     await _run_single_model_jobs(
         args,
         stage="cross_entropy",
@@ -315,6 +322,7 @@ async def run_cross_entropy(args, cfg, jobs, steer_dir, out_dir, eval_parquet):
             concept_slug=slug,
             concept_label=label,
             block_idx_to_steer=None if args.layers == 0 else int(args.layers),
+            exact_layer_idx=getattr(args, "layer", None),
             eval_parquet=str(eval_parquet),
             steer_dir=str(steer_dir),
             save_dir=str(out_dir),
@@ -326,6 +334,7 @@ async def run_cross_entropy(args, cfg, jobs, steer_dir, out_dir, eval_parquet):
 
 
 async def run_log_odds(args, cfg, jobs, prompts_path, out_dir):
+    """Plan and run token log-odds jobs."""
     await _run_single_model_jobs(
         args,
         stage="log_odds",
@@ -345,6 +354,7 @@ async def run_log_odds(args, cfg, jobs, prompts_path, out_dir):
 
 
 async def run_mmlu(args, cfg, jobs, steer_dir, out_dir):
+    """Plan and run MMLU jobs."""
     await _run_single_model_jobs(
         args,
         stage="mmlu",
@@ -359,6 +369,7 @@ async def run_mmlu(args, cfg, jobs, steer_dir, out_dir):
             steer_dir=str(steer_dir),
             save_dir=str(out_dir),
             block_idx_to_steer=None if args.layers == 0 else int(args.layers),
+            exact_layer_idx=getattr(args, "layer", None),
             layer_path=args.layer_path,
             cfg_dict=asdict(cfg),
             rank_hint=rank,
@@ -366,7 +377,7 @@ async def run_mmlu(args, cfg, jobs, steer_dir, out_dir):
     )
 
 
-async def run_behavior(
+async def run_concept_probs(
     args,
     cfg,
     jobs,
@@ -376,10 +387,11 @@ async def run_behavior(
     *,
     continuous: bool,
 ):
+    """Plan and run concept-probability jobs."""
     actor_cls = (
-        DistributedContinuousBehaviorActor
+        DistributedContinuousConceptProbsActor
         if continuous
-        else DistributedBehaviorActor
+        else DistributedConceptProbsActor
     )
     judge_dtype = getattr(args, "judge_dtype", args.dtype)
     for model_index, model_name in enumerate(dict.fromkeys(args.models)):
@@ -429,9 +441,9 @@ async def run_behavior(
 
                     rank_hint=rank,
                 )
-                if continuous:
-                    kwargs["exact_layer_idx"] = getattr(args, "layer", None)
-                return await pool.call(rank, "compute_behavior_curves", **kwargs)
+                if getattr(args, "layer", None) is not None:
+                    kwargs["exact_layer_idx"] = int(args.layer)
+                return await pool.call(rank, "compute_concept_probs_curves", **kwargs)
 
             async for rank, result in run_ranked_jobs(
                 model_jobs, plan.logical_actors, run_one
@@ -453,6 +465,7 @@ async def run_behavior(
 
 
 async def run_rescore(args, cfg, files, input_root: Path, output_root: Path):
+    """Plan and run rescoring jobs."""
     specs = [ModelSpec(args.judge_model, args.dtype)]
     plan = plan_models(args, specs, desired_actors=len(files))
     print_plan(

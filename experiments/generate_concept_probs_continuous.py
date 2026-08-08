@@ -1,17 +1,20 @@
+"""Command-line entry point for continuous concept-probability curves."""
+
 import argparse
 import asyncio
 from pathlib import Path
 
 from monarch.actor import shutdown_context
 
-from actors.tasks.behavior_continuous import BehaviorConfig
-from steering.data import discover_steering_jobs
-from steering.runtime.pool import add_distributed_args
-from experiments.runners import run_behavior
+from actors.tasks.concept_probs_continuous import ConceptProbsConfig
+from utils.data import discover_steering_jobs
+from utils.runtime.pool import add_distributed_args
+from experiments.runners import run_concept_probs
 
 
 async def main_async(args):
-    config = BehaviorConfig(
+    """Run the experiment from parsed command-line arguments."""
+    config = ConceptProbsConfig(
         judge_model_name=args.judge_model,
         generator_dtype=args.dtype,
         judge_dtype=args.dtype,
@@ -36,7 +39,7 @@ async def main_async(args):
     jobs = discover_steering_jobs(steer_dir, list(args.models))
     if not jobs:
         raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
-    await run_behavior(
+    await run_concept_probs(
         args,
         config,
         jobs,
@@ -48,12 +51,13 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--judge_model", required=True)
     parser.add_argument("--steer_dir", default="steering_vectors")
     parser.add_argument("--contexts_file", default="data/contexts.jsonl")
-    parser.add_argument("--out_dir", default="behavior_data_continuous")
+    parser.add_argument("--out_dir", default="concept_probs_data_continuous")
     parser.add_argument("--alpha_start", type=float, default=-40.0)
     parser.add_argument("--alpha_end", type=float, default=40.0)
     parser.add_argument("--alpha_steps", type=int, default=41)

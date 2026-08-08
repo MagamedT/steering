@@ -1,10 +1,12 @@
+"""Assign queued jobs to available model workers."""
+
 from __future__ import annotations
 
 import asyncio
 
 
 async def run_ranked_jobs(jobs, worker_count, run_one):
-    """Keep at most one job active per logical actor rank."""
+    """Keep at most one job active on each model worker."""
     next_index = 0
     in_flight = {}
 

@@ -1,3 +1,5 @@
+"""Provide small helpers for MMLU task selection and scoring."""
+
 from __future__ import annotations
 
 from functools import partialmethod
@@ -6,6 +8,7 @@ from typing import Any, Optional, Sequence
 
 
 def disable_tqdm() -> None:
+    """Disable progress bars when tqdm is available."""
     try:
         from tqdm import tqdm
 
@@ -15,6 +18,7 @@ def disable_tqdm() -> None:
 
 
 def resolve_tasks(task_names: Optional[Sequence[str]], task_enum):
+    """Resolve requested task names to MMLU enum values."""
     if not task_names or (
         len(task_names) == 1 and str(task_names[0]).lower() == "all"
     ):
@@ -29,6 +33,7 @@ def resolve_tasks(task_names: Optional[Sequence[str]], task_enum):
 
 
 def extract_choice(text: str) -> Optional[str]:
+    """Extract the first multiple-choice letter from text."""
     if not text:
         return None
     value = text.strip()
@@ -42,6 +47,7 @@ def extract_choice(text: str) -> Optional[str]:
 
 
 def task_scores_to_dict(task_scores: Any) -> Optional[dict[str, float]]:
+    """Convert supported score tables into a plain dictionary."""
     if task_scores is None:
         return None
     if isinstance(task_scores, dict):

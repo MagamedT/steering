@@ -1,3 +1,5 @@
+"""Run the full experiment pipeline with small CPU-only stand-ins."""
+
 import asyncio
 import contextlib
 import json
@@ -23,8 +25,8 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from actors.tasks import behavior as concept_probs_actor
-from actors.tasks import behavior_continuous as concept_probs_continuous_actor
+from actors.tasks import concept_probs as concept_probs_actor
+from actors.tasks import concept_probs_continuous as concept_probs_continuous_actor
 from actors.tasks import rubric_judge
 from actors.tasks import rescore as rescore_actor
 from actors.tasks import cross_entropy as cross_entropy_actor
@@ -33,9 +35,9 @@ from actors.tasks import mmlu as mmlu_actor
 from actors.tasks import prompts as prompts_actor
 from actors.tasks import next_token_probs as next_token_probs_actor
 from actors.tasks import steering as distributed_steering_actor
-from steering.runtime.placement import GpuMemory
-from steering.runtime import pool as distributed_runtime
-from steering.naming import model_slug
+from utils.runtime.placement import GpuMemory
+from utils.runtime import pool as distributed_runtime
+from utils.naming import model_slug
 from experiments import generate_concept_probs
 from experiments import generate_concept_probs_continuous
 from experiments import generate_cross_entropy
@@ -49,6 +51,7 @@ from experiments import rescore_concept_probs_continuous
 
 
 def make_tiny_model(path: Path) -> None:
+    """Build a tiny local model and tokenizer for CPU tests."""
     vocab = {
         "[PAD]": 0,
         "[BOS]": 1,
@@ -96,22 +99,27 @@ def make_tiny_model(path: Path) -> None:
 
 
 class LocalCall:
+    """Copy the call pattern used by Monarch during CPU tests."""
     def __init__(self, actor, name):
         self.actor = actor
         self.name = name
 
     async def _invoke(self, *args, **kwargs):
+        """Run one task on every local worker."""
         endpoint = getattr(type(self.actor), self.name)
         return await endpoint._method(self.actor, *args, **kwargs)
 
     async def call_one(self, *args, **kwargs):
+        """Run one task and return its first result."""
         return await self._invoke(*args, **kwargs)
 
     async def call(self, *args, **kwargs):
+        """Run one task on the local model worker."""
         return {0: await self._invoke(*args, **kwargs)}
 
 
 class LocalActor:
+    """Wrap one local actor for CPU tests."""
     def __init__(self, actor):
         self.actor = actor
 
@@ -120,10 +128,12 @@ class LocalActor:
 
 
 class LocalActorGroup:
+    """Expose a slice of local actors as one logical group."""
     def __init__(self, actor):
         self.actor = actor
 
     def slice(self, **_rank):
+        """Return the requested local actor group."""
         return LocalActor(self.actor)
 
 
@@ -131,30 +141,38 @@ class LocalActorGroup:
         return LocalCall(self.actor, name)
 
 class LocalMesh:
+    """Provide the process-mesh methods used by the runners."""
     def to_table(self):
+        """Return a short description of the local mesh."""
         return "cpu worker"
 
     def spawn(self, _name, actor_class, *args):
+        """Create local actor instances."""
         actor = object.__new__(actor_class)
         actor_class.__init__(actor, *args)
         return LocalActorGroup(actor)
 
 
     async def stop(self):
+        """Stop the local mesh."""
         return None
 
 class LocalHost:
+    """Create local workers for CPU tests."""
     def spawn_procs(self, **_kwargs):
+        """Create the requested number of local workers."""
         return LocalMesh()
 
 
 def small_config(config_class, **small_values):
+    """Build a fast configuration for CPU tests."""
     def build(**values):
         return config_class(**{**small_values, **values})
 
     return build
 
 def runtime_args(**values):
+    """Build default runner arguments for CPU tests."""
     defaults = {
         "model_parallel_size": "1",
         "dtype": "float32",
@@ -193,6 +211,7 @@ def runtime_args(**values):
 
 @contextlib.contextmanager
 def cpu_only(model_path: Path):
+    """Redirect CUDA operations to CPU during the test."""
     original_to = torch.Tensor.to
     original_tensor = torch.tensor
     original_ones_like = torch.ones_like
@@ -283,9 +302,9 @@ def cpu_only(model_path: Path):
         stack.enter_context(
             patch.object(
                 generate_concept_probs,
-                "BehaviorConfig",
+                "ConceptProbsConfig",
                 small_config(
-                    concept_probs_actor.BehaviorConfig,
+                    concept_probs_actor.ConceptProbsConfig,
                     generator_dtype="float32",
                     judge_dtype="float32",
                     alpha_start=-1,
@@ -302,9 +321,9 @@ def cpu_only(model_path: Path):
         stack.enter_context(
             patch.object(
                 generate_concept_probs_continuous,
-                "BehaviorConfig",
+                "ConceptProbsConfig",
                 small_config(
-                    concept_probs_continuous_actor.BehaviorConfig,
+                    concept_probs_continuous_actor.ConceptProbsConfig,
                     generator_dtype="float32",
                     judge_dtype="float32",
                     alpha_start=-1,
@@ -322,7 +341,7 @@ def cpu_only(model_path: Path):
         )
         stack.enter_context(
             patch.object(
-                concept_probs_continuous_actor.BehaviorActor,
+                concept_probs_continuous_actor.ConceptProbsActor,
                 "_judge_completion_scores",
                 lambda _self, samples, concept, cfg, instruction=None: torch.full(
                     (len(samples),),
@@ -377,13 +396,17 @@ def cpu_only(model_path: Path):
 
 @contextlib.contextmanager
 def fake_deepeval():
+    """Provide small DeepEval stand-ins for the CPU test."""
     class MMLUTask(Enum):
+        """Minimal MMLU task enum used by the test."""
         HIGH_SCHOOL_COMPUTER_SCIENCE = "high_school_computer_science"
 
     class DeepEvalBaseLLM:
+        """Minimal base class used by the fake MMLU runner."""
         pass
 
     class MMLU:
+        """Small MMLU stand-in that records generated answers."""
         def __init__(self, tasks, n_shots):
             self.tasks = tasks
             self.n_shots = n_shots
@@ -391,6 +414,7 @@ def fake_deepeval():
             self.task_scores = None
 
         def evaluate(self, model, batch_size):
+            """Generate one answer and expose fixed benchmark scores."""
             model.generate("A B C D")
             self.overall_score = 1.0
             self.task_scores = {task.value: 1.0 for task in self.tasks}
@@ -413,7 +437,9 @@ def fake_deepeval():
 
 
 class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
+    """Exercise every generator without a GPU or model download."""
     def test_continuous_pair_probability(self):
+        """Check that true and false logits produce the expected probability."""
         pair = rubric_judge.pair_probability
         self.assertAlmostEqual(pair(0.0, 0.0), 0.5)
         self.assertAlmostEqual(pair(1.0986122886681098, 0.0), 0.75, places=6)
@@ -422,6 +448,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
         torch.testing.assert_close(result, torch.tensor([0.5, 0.0]))
 
     async def test_all_generators(self):
+        """Run every experiment with tiny local models."""
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             tiny_model = root / "tiny-model"
@@ -470,15 +497,15 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                 ))
                 self.assertTrue(any(plot_out.rglob("*.npz")))
 
-                behavior_out = root / "behavior"
+                concept_probs_out = root / "concept_probs"
                 await generate_concept_probs.main_async(runtime_args(
                     models=[model_name], judge_model=model_name, steer_dir=str(steering),
-                    contexts_file=str(contexts), out_dir=str(behavior_out), layers=1,
+                    contexts_file=str(contexts), out_dir=str(concept_probs_out), layers=1,
                     layer_path=None, dim="gpu", max_gpus=1,
                 ))
-                self.assertTrue(any(behavior_out.rglob("*.npz")))
+                self.assertTrue(any(concept_probs_out.rglob("*.npz")))
 
-                continuous_out = root / "behavior_continuous"
+                continuous_out = root / "concept_probs_continuous"
                 await generate_concept_probs_continuous.main_async(runtime_args(
                     models=[model_name], judge_model=model_name, steer_dir=str(steering),
                     contexts_file=str(contexts), out_dir=str(continuous_out), layers=1,
@@ -494,6 +521,8 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(np.all((0.0 <= scores) & (scores <= 1.0)))
                     self.assertTrue(np.allclose(scores, 0.5))
 
+                rescore_batch_sizes = []
+
                 def fake_rescore_details(
                     _tokenizer,
                     _model,
@@ -503,6 +532,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     **_kwargs,
                 ):
                     count = len(samples)
+                    rescore_batch_sizes.append(count)
                     values = torch.full((count,), 0.5, dtype=torch.float32)
                     return rescore_actor.RubricJudgeDetails(
                         scores=values,
@@ -520,7 +550,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                         verdict_positions=(0,) * count,
                     )
 
-                rescore_out = root / "behavior_rescored"
+                rescore_out = root / "concept_probs_rescored"
                 with patch.object(
                     rescore_actor,
                     "rubric_completion_scores",
@@ -531,6 +561,11 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                         judge_model=model_name,
                     ))
                 self.assertTrue(any(rescore_out.rglob("*.npz")))
+                self.assertTrue(rescore_batch_sizes)
+                self.assertEqual(
+                    set(rescore_batch_sizes),
+                    {scores.shape[-1]},
+                )
 
                 log_out = root / "log_odds"
                 await generate_log_odds.main_async(runtime_args(
@@ -560,7 +595,9 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
             remote_file = "sample-10BT/train/part.parquet"
 
             class FakeApi:
+                """Return a fixed dataset file list for download tests."""
                 def list_repo_files(self, **_kwargs):
+                    """Return the fixed dataset file list."""
                     return [remote_file]
 
             def fake_download(**kwargs):

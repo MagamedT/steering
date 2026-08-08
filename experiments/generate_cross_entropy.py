@@ -1,3 +1,5 @@
+"""Command-line entry point for cross-entropy curves."""
+
 import argparse
 import asyncio
 from pathlib import Path
@@ -5,12 +7,13 @@ from pathlib import Path
 from monarch.actor import shutdown_context
 
 from actors.tasks.cross_entropy import CrossEntropyPlotConfig
-from steering.data import discover_steering_jobs
-from steering.runtime.pool import add_distributed_args
+from utils.data import discover_steering_jobs
+from utils.runtime.pool import add_distributed_args
 from experiments.runners import run_cross_entropy
 
 
 async def main_async(args):
+    """Run the experiment from parsed command-line arguments."""
     config = CrossEntropyPlotConfig(seed=args.seed, dtype=args.dtype)
     steer_dir = Path(args.steer_dir)
     out_dir = Path(args.out_dir)
@@ -28,12 +31,14 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--steer_dir", default="steering_vectors")
     parser.add_argument("--eval_parquet", required=True)
     parser.add_argument("--out_dir", default="cross_entropy")
     parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--layer", type=int, default=None)
     parser.add_argument("--layer_path", default=None)
     parser.add_argument("--seed", type=int, default=0)
     add_distributed_args(parser, default_dtype=CrossEntropyPlotConfig.dtype)

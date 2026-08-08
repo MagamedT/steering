@@ -1,3 +1,5 @@
+"""Command-line entry point for token log-odds."""
+
 import argparse
 import asyncio
 import json
@@ -6,12 +8,13 @@ from pathlib import Path
 from monarch.actor import shutdown_context
 
 from actors.tasks.log_odds import LogOddsConfig
-from steering.naming import model_slug, slugify
-from steering.runtime.pool import add_distributed_args
+from utils.naming import model_slug, slugify
+from utils.runtime.pool import add_distributed_args
 from experiments.runners import run_log_odds
 
 
 def discover_prompt_jobs(prompts_dir: Path, models: list[str]):
+    """Find concept prompt pairs that are ready to score."""
     positives = {
         path.name[: -len("_positive.jsonl")]: path
         for path in prompts_dir.glob("*_positive.jsonl")
@@ -35,6 +38,7 @@ def discover_prompt_jobs(prompts_dir: Path, models: list[str]):
 
 
 async def main_async(args):
+    """Run the experiment from parsed command-line arguments."""
     prompts_path = Path(args.prompts_dir)
     out_dir = Path(args.out_dir)
     if not prompts_path.exists():
@@ -55,6 +59,7 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--prompts_dir", default="prompts")

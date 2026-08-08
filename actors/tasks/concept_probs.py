@@ -1,3 +1,5 @@
+"""Generate samples and measure whether they express a concept."""
+
 import json
 import re
 from dataclasses import dataclass
@@ -9,25 +11,22 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
-from steering.batching import chunked_with_bounds
-from steering.data import count_negative_prompts, load_contexts_for_concept
-from steering.modeling import (
+from utils.batching import chunked_with_bounds
+from utils.data import count_negative_prompts, load_contexts_for_concept
+from utils.modeling import (
     find_block_list,
     load_steering_vector,
     maybe_apply_chat_template,
     one_token_ids,
 )
-from steering.naming import model_slug
-
-
-# -----------------------------
-# Config (sent as dict)
-# -----------------------------
+from utils.naming import model_slug
 
 
 @dataclass
-class BehaviorConfig:
-    # model loading
+class ConceptProbsConfig:
+    """Settings for generation and concept scoring."""
+
+    # Model loading
     generator_dtype: str = "bfloat16"
     judge_dtype: str = "bfloat16"
 
@@ -71,34 +70,25 @@ class BehaviorConfig:
     progress_every: int = 1
 
 
-# -----------------------------
-# Actor (one GPU)
-# -----------------------------
-
-
-class BehaviorActor(Actor):
-    """One actor per GPU.
-
-    Caches:
-      - generator model/tokenizer
-      - judge model/tokenizer
-
-    and computes p(concept present) curves vs alpha.
-    """
+class ConceptProbsActor(Actor):
+    """Generate completions and measure concept probability."""
 
     def _ensure_generator(self, model_name: str, dtype_str: str):
+        """Check that the requested generator is already loaded."""
         if self._gen_name == model_name and self._gen_dtype == dtype_str:
             return
         raise RuntimeError("Distributed actor was initialized for a different generator")
 
     def _ensure_judge(self, model_name: str, dtype_str: str):
+        """Check that the requested judge is already loaded."""
         if self._judge_name == model_name and self._judge_dtype == dtype_str:
             return
         raise RuntimeError("Distributed actor was initialized for a different judge")
 
-    # --------- judge scoring ---------
+    # Judge scoring
 
     def _ensure_judge_token_ids(self):
+        """Cache token IDs for binary judge answers."""
         assert self._judge_tok is not None
         if self._judge_token_ids_10 is not None:
             return
@@ -107,7 +97,7 @@ class BehaviorActor(Actor):
         ones = one_token_ids(tok, ["1", " 1", "\n1", "\n 1"])  # noqa: W605
         zeros = one_token_ids(tok, ["0", " 0", "\n0", "\n 0"])  # noqa: W605
         if not ones or not zeros:
-            # digits should basically always work, but keep an explicit error for clarity
+            # Raise a clear error if the tokenizer cannot represent binary answers.
             raise RuntimeError(
                 f"Could not find 1-token ids for judge answers. ones={ones}, zeros={zeros}. "
                 "Try disabling chat template or changing the judge prompt to end with 'Answer:' (no trailing space)."
@@ -115,11 +105,8 @@ class BehaviorActor(Actor):
         self._judge_token_ids_10 = (ones, zeros)
 
     def _join_samples_for_judge(self, samples: List[str]) -> str:
-        """
-        Join multiple samples into one mega-text for an ANY-of-K judge.
-        This is where you control truncation to avoid blowing up the judge prompt.
-        """
-        # Optional: cap each sample so early samples don't eat the whole context window
+        """Join samples into one bounded prompt for the binary judge."""
+        # Limit each sample so one long completion cannot fill the prompt.
         per_sample_cap = 800  # adjust as needed
         cleaned = []
         for s in samples:
@@ -131,14 +118,8 @@ class BehaviorActor(Actor):
         return "\n\n--- SAMPLE ---\n\n".join(cleaned)
 
 
-    def _judge_any_batch(self, samples: List[str], concept: str, cfg: BehaviorConfig) -> torch.Tensor:
-        """
-        B=1 judge: takes a list of texts, concatenates them, asks once:
-          "is concept present anywhere?"
-        Returns a tensor shape [1] with 0.0 or 1.0.
-
-        Uses regex parsing on decoded answer (tokenizer-robust).
-        """
+    def _judge_any_batch(self, samples: List[str], concept: str, cfg: ConceptProbsConfig) -> torch.Tensor:
+        """Return whether any sample expresses the concept."""
         assert self._judge_tok is not None and self._judge_model is not None
         tok = self._judge_tok
         model = self._judge_model
@@ -202,13 +183,10 @@ class BehaviorActor(Actor):
         return torch.tensor([y], device=input_ids.device, dtype=torch.float32)
 
 
-    # --------- generation ---------
+    # Generation
 
-    def _generate_completions(self, prompts: List[str], cfg: BehaviorConfig) -> List[List[str]]:
-        """Generate n_samples_per_context completions for each prompt.
-
-        Returns: list of length len(prompts), each is list[str] of length K.
-        """
+    def _generate_completions(self, prompts: List[str], cfg: ConceptProbsConfig) -> List[List[str]]:
+        """Generate the requested number of completions for each prompt."""
         assert self._gen_tok is not None and self._gen_model is not None
         tok = self._gen_tok
         model = self._gen_model
@@ -266,7 +244,7 @@ class BehaviorActor(Actor):
         if len(texts) != B * K:
             raise RuntimeError(f"Unexpected generate() output size: got {len(texts)}, expected {B}*{K}={B*K}.")
 
-        # HF repeats each input row K times via repeat_interleave => grouped by prompt.
+        # Generated samples are grouped by their source prompt.
         grouped: List[List[str]] = []
         idx = 0
         for _ in range(B):
@@ -274,7 +252,7 @@ class BehaviorActor(Actor):
             idx += K
         return grouped
 
-    # --------- steering hook ---------
+    # Steering hook
 
     @staticmethod
     def _make_steer_hook(alpha: float, steer_vec: torch.Tensor, last_token_only: bool):
@@ -304,12 +282,10 @@ class BehaviorActor(Actor):
 
         return _hook
 
-    # -----------------------------
     # Endpoint
-    # -----------------------------
 
     @endpoint
-    async def compute_behavior_curves(
+    async def compute_concept_probs_curves(
         self,
         model_name: str,
         concept_slug: str,
@@ -321,10 +297,12 @@ class BehaviorActor(Actor):
         layer_path: Optional[str] = None,
         cfg_dict: Optional[Dict[str, Any]] = None,
         rank_hint: int = 0,
+        exact_layer_idx: Optional[int] = None,
     ) -> Dict[str, Any]:
-        cfg = BehaviorConfig(**(cfg_dict or {}))
+        """Generate and save concept-probability curves for one concept."""
+        cfg = ConceptProbsConfig(**(cfg_dict or {}))
         if not cfg.judge_model_name:
-            raise ValueError("BehaviorConfig.judge_model_name must be set (via --judge_model).")
+            raise ValueError("ConceptProbsConfig.judge_model_name must be set (via --judge_model).")
 
         # deterministic seed per GPU
         torch.manual_seed(int(cfg.seed) + int(rank_hint))
@@ -340,7 +318,14 @@ class BehaviorActor(Actor):
         # resolve blocks
         blocks = find_block_list(gen_model, override_path=layer_path)
         n_blocks = len(blocks)
-        if block_idx_to_steer is None:
+        if exact_layer_idx is not None:
+            exact_layer_idx = int(exact_layer_idx)
+            if not 0 <= exact_layer_idx < n_blocks:
+                raise ValueError(
+                    f"Layer {exact_layer_idx} is outside [0, {n_blocks - 1}]."
+                )
+            layer_indices = [exact_layer_idx]
+        elif block_idx_to_steer is None:
             layer_indices = list(range(n_blocks))
         else:
             # Interpret integer input as "sample this many layers uniformly across depth".
@@ -423,7 +408,7 @@ class BehaviorActor(Actor):
                         # Judge each context with ONE prompt (B=1 each time)
                         p1_context = []
                         for samples in grouped_completions:
-                            # Any-of-K judge: one binary decision for the grouped samples of this context.
+                            # Judge the sample group once for this context.
                             p1 = self._judge_any_batch(samples, concept=concept_label, cfg=cfg)  # [1]
                             p1_context.append(p1)
 
@@ -431,7 +416,7 @@ class BehaviorActor(Actor):
                         p1_mean = p1_context.cpu().numpy().astype(np.float32)
                         p1_by_ctx[start:end, ai] = p1_mean
 
-                        # keep mailbox responsive
+                        # Yield so other actor calls can run.
                         if cfg.progress_every and ((start // max(1, int(cfg.gen_context_batch_size))) % int(cfg.progress_every) == 0):
                             await asyncio.sleep(0)
 
@@ -465,7 +450,7 @@ class BehaviorActor(Actor):
                 mean_match = np.full((A,), np.nan, dtype=np.float32)
 
             # write file
-            out_path = save_root / f"layer_{int(layer_idx)}_behavior.npz"
+            out_path = save_root / f"layer_{int(layer_idx)}_concept_probs.npz"
             meta = {
                 "model": model_name,
                 "concept_slug": concept_slug,
@@ -506,7 +491,7 @@ class BehaviorActor(Actor):
 
             results.append({"layer_idx": int(layer_idx), "file": str(out_path)})
 
-            # allow mailbox / scheduler responsiveness between layers
+            # Yield between layers so other actor calls can run.
             await asyncio.sleep(0)
 
         torch.cuda.empty_cache()

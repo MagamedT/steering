@@ -1,59 +1,42 @@
-# Unified model parallelism
+# Running models on one or more GPUs
 
-Every GPU experiment uses the same logical-actor runtime. A logical actor owns
-one model replica and spans one or more contiguous Monarch worker processes,
-with one process per GPU.
+A **model worker** is one loaded copy of a model. A worker uses one GPU when the model fits, or several GPUs when the model must be split. The code calls this a `logical_actor`, but the user-facing idea is simply one running model copy.
 
-- `--model_parallel_size auto` (the default) estimates model memory, chooses
-  the smallest compatible group, and packs as many replicas as possible on the
-  visible GPUs. It selects one rank when the model fits on one GPU.
-- `--model_parallel_size 1` explicitly forces one-rank logical actors.
+- `--model_parallel_size auto` is the default. It estimates memory and chooses how many GPUs each model worker needs.
+- `--model_parallel_size 1` forces every model worker onto one GPU.
 
-There is no separate single-GPU implementation. A one-GPU run is the `k=1`
-case of the same actor, scheduler, model loader, and endpoint code.
+The same experiment code handles both cases.
 
-Runtime responsibilities are separated by package:
+## Where the work happens
 
-- `steering/runtime/actor.py` owns rank topology and model loading;
-- `steering/runtime/placement.py` owns memory estimates and actor plans;
-- `steering/runtime/pool.py` owns Monarch process meshes and logical groups;
-- `steering/runtime/scheduler.py` assigns independent jobs to logical actors;
-- `actors/model_actors.py` binds model lifecycles to endpoints in `actors/tasks/`.
+- `utils/runtime/actor.py` loads a model and sets up its GPUs.
+- `utils/runtime/placement.py` estimates memory and chooses a GPU count.
+- `utils/runtime/pool.py` starts and stops model workers.
+- `utils/runtime/scheduler.py` assigns jobs to free model workers.
+- `actors/model_actors.py` loads the models used by each experiment task.
 
-The unified runtime is used by prompt generation, steering-vector extraction,
-next-token probability plots, log-odds, cross-entropy, MMLU, binary concept
-probabilities, continuous concept probabilities, and continuous-score
-rescoring. Concept-probability actors plan the generator and judge together
-because both models coexist on each logical actor.
+Prompt generation, steering-vector extraction, probability curves, log-odds, cross-entropy, MMLU, concept scoring, and rescoring all use this shared code.
 
-## Placement and scheduling
+Concept scoring loads both a generator and a judge in each model worker, so the memory estimate includes both models.
 
-For `auto`, the controller:
+## How automatic GPU selection works
 
-1. builds meta-device model skeletons and estimates model-weight memory;
-2. applies the configured inference headroom and current free-VRAM budget;
-3. chooses the smallest tensor-parallel size compatible with every resident
-   model;
-4. packs up to `floor(available_gpus / GPUs_per_actor)` replicas, bounded by
-   the number of independent jobs.
+With `--model_parallel_size auto`, the program:
 
-For example, when Qwen2.5-72B needs two GPUs, four visible GPUs can host two
-concurrent logical actors. If there are at least two concept/context jobs, the
-scheduler keeps both two-GPU replicas active.
+1. estimates the model-weight memory without loading the weights;
+2. reserves some free GPU memory for activations and generation;
+3. chooses the smallest supported GPU count that can hold the model;
+4. uses any remaining GPUs for more independent model workers.
 
-Every endpoint call is broadcast to every rank in its logical actor so model
-collectives remain aligned. All ranks execute forward and generation calls;
-only tensor-parallel rank zero writes output files and returns the scheduler
-result. Log-odds, cross-entropy, and token-probability actors collectively
-materialize full-vocabulary logits when the language head is sharded.
+For example, if one model copy needs two GPUs and four GPUs are available, two independent jobs can run at the same time.
 
-Models are grouped by model id so one actor pool never reloads weights during a
-run. Prompt generation creates one pool per generation phase. Experiments with
-several requested models create one pool per model topology in sequence.
+Every GPU holding part of the same model receives the same input. All of those GPUs run the model, while the first GPU writes the output file and returns the result.
 
-## Planning without loading weights
+A model is loaded once for a set of jobs. When several model names are requested, the program finishes one model's jobs before loading the next model.
 
-All GPU launchers accept `--plan_only`. For example:
+## Check a layout without loading the model
+
+Use `--plan_only` to print the GPU layout:
 
 ```bash
 python experiments/generate_cross_entropy.py \
@@ -65,27 +48,18 @@ python experiments/generate_cross_entropy.py \
   --plan_only
 ```
 
-The default placement reserve keeps 10% of currently free VRAM unused and
-adds 20% headroom above estimated model-weight memory. Both controls are
-explicit:
+The default settings keep 10% of currently free GPU memory unused and add 20% above the estimated model weights:
 
 ```text
 --gpu_utilization 0.90 --inference_headroom 1.20
 ```
 
-Use `--max_gpus N` to cap the allocation and `--local_files_only` to prevent
-Hub access.
+Use `--max_gpus N` to limit the number of GPUs. Use `--local_files_only` to prevent Hugging Face downloads.
 
-## Constraints
+## Current limits
 
-- Multi-GPU loading requires every sharded model to provide a Transformers
-  `base_model_tp_plan` and a compatible tensor-parallel divisor.
-- Generator and judge models in concept-probability experiments must share a
-  compatible group size because they live on the same GPU group.
-- Placement is single-host; the rank layout assumes all workers belong to one
-  host.
-- The estimate covers weights plus configurable headroom. Activation and KV
-  cache usage still depends on batch size, sequence length, and generation
-  length.
-- Tensor parallelism communicates at every layer and benefits from a fast
-  intra-node interconnect.
+- Multi-GPU loading only works when the model's Transformers configuration describes how to split the model.
+- A generator and judge loaded together must support the same GPU count.
+- All GPUs must be on one host.
+- The memory estimate covers model weights plus the chosen extra space. Actual memory also depends on batch size, prompt length, and generated length.
+- Splitting a model across GPUs works best with a fast connection between those GPUs.

@@ -1,3 +1,5 @@
+"""Provide small helpers for splitting sequences into batches."""
+
 from __future__ import annotations
 
 from typing import Any, Iterable, Iterator, Sequence, TypeVar

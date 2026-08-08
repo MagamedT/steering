@@ -1,4 +1,4 @@
-"""Continuous concept-probability scoring with a separate judge LLM."""
+"""Score each completion for concept presence with a judge model."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
-from steering.batching import chunked_with_bounds
-from steering.data import count_negative_prompts, load_contexts_for_concept
-from steering.modeling import find_block_list, load_steering_vector
-from steering.naming import model_slug
+from utils.batching import chunked_with_bounds
+from utils.data import count_negative_prompts, load_contexts_for_concept
+from utils.modeling import find_block_list, load_steering_vector
+from utils.naming import model_slug
 
 from .rubric_judge import (
     DEFAULT_CONCEPT_RUBRIC,
@@ -42,7 +42,8 @@ def mean_completion_score(scores: Sequence[float] | torch.Tensor) -> float:
 
 
 @dataclass
-class BehaviorConfig:
+class ConceptProbsConfig:
+    """Settings for generation and concept scoring."""
     generator_dtype: str = "bfloat16"
     judge_dtype: str = "bfloat16"
     judge_model_name: str = ""
@@ -73,10 +74,11 @@ class BehaviorConfig:
     progress_every: int = 1
 
 
-class BehaviorActor(Actor):
-    """Generate steered completions and judge each one with a score in [0,1]."""
+class ConceptProbsActor(Actor):
+    """Generate completions and measure concept probability."""
 
     def _ensure_generator(self, model_name: str, dtype_str: str):
+        """Check that the requested generator is already loaded."""
         if (
             self._gen_name == model_name
             and self._gen_dtype == dtype_str
@@ -85,6 +87,7 @@ class BehaviorActor(Actor):
         raise RuntimeError("Distributed actor was initialized for a different generator")
 
     def _ensure_judge(self, model_name: str, dtype_str: str):
+        """Check that the requested judge is already loaded."""
         if (
             self._judge_name == model_name
             and self._judge_dtype == dtype_str
@@ -96,10 +99,10 @@ class BehaviorActor(Actor):
         self,
         samples: List[str],
         concept: str,
-        cfg: BehaviorConfig,
+        cfg: ConceptProbsConfig,
         instruction: str | None = None,
     ) -> torch.Tensor:
-        """Return sigmoid(z_true-z_false) for every completion."""
+        """Return one concept score for each completion."""
         assert self._judge_tok is not None and self._judge_model is not None
         details = rubric_completion_scores(
             self._judge_tok,
@@ -127,8 +130,9 @@ class BehaviorActor(Actor):
     def _generate_completions(
         self,
         prompts: List[str],
-        cfg: BehaviorConfig,
+        cfg: ConceptProbsConfig,
     ) -> List[List[str]]:
+        """Generate sampled completions for each prompt."""
         assert self._gen_tok is not None and self._gen_model is not None
         enc = self._gen_tok(
             prompts,
@@ -194,6 +198,7 @@ class BehaviorActor(Actor):
         steer_vec: torch.Tensor,
         last_token_only: bool,
     ):
+        """Create a hook that adds the steering vector to layer output."""
         def hook(_module, _inputs, output):
             hidden = output[0] if isinstance(output, (tuple, list)) else output
             if not torch.is_tensor(hidden):
@@ -218,7 +223,7 @@ class BehaviorActor(Actor):
         return hook
 
     @endpoint
-    async def compute_behavior_curves(
+    async def compute_concept_probs_curves(
         self,
         model_name: str,
         concept_slug: str,
@@ -232,9 +237,10 @@ class BehaviorActor(Actor):
         rank_hint: int = 0,
         exact_layer_idx: Optional[int] = None,
     ) -> Dict[str, Any]:
-        cfg = BehaviorConfig(**(cfg_dict or {}))
+        """Generate and save concept-probability curves for one concept."""
+        cfg = ConceptProbsConfig(**(cfg_dict or {}))
         if not cfg.judge_model_name:
-            raise ValueError("BehaviorConfig.judge_model_name must be set.")
+            raise ValueError("ConceptProbsConfig.judge_model_name must be set.")
 
         torch.manual_seed(int(cfg.seed) + int(rank_hint))
         if torch.cuda.is_available():
@@ -439,7 +445,7 @@ class BehaviorActor(Actor):
                 mean_positive = np.full(alpha_count, np.nan, dtype=np.float32)
                 mean_match = np.full(alpha_count, np.nan, dtype=np.float32)
 
-            out_path = save_root / f"layer_{int(layer_idx)}_behavior.npz"
+            out_path = save_root / f"layer_{int(layer_idx)}_concept_probs.npz"
             meta = {
                 "model": model_name,
                 "concept_slug": concept_slug,

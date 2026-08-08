@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
+# Build Monarch and its system dependencies for this environment.
 set -euo pipefail
 
-# -------------------- knobs --------------------
+# Build options.
 export PYO3_PYTHON="${PYO3_PYTHON:-/venv/main/bin/python3.12}"
 export MONARCH_DIR="${MONARCH_DIR:-/workspace/monarch}"
 export USE_TENSOR_ENGINE="${USE_TENSOR_ENGINE:-1}"   # default ON now
 export RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-nightly}"
 export TORCH_ACCELERATOR="${TORCH_ACCELERATOR:-auto}"  # auto|cpu|cu128|cu126|rocm6.3
-# ------------------------------------------------
 
+# Print a highlighted build step.
 say(){ printf "\033[1;36m[+] %s\033[0m\n" "$*"; }
 
 say "Python = $PYO3_PYTHON"

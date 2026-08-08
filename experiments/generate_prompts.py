@@ -1,14 +1,17 @@
+"""Command-line entry point for prompt generation."""
+
 import argparse
 import asyncio
 
 from monarch.actor import shutdown_context
 
 from actors.tasks.prompts import GenConfig
-from steering.runtime.pool import add_distributed_args
+from utils.runtime.pool import add_distributed_args
 from experiments.runners import run_prompts
 
 
 async def main_async(args):
+    """Run the experiment from parsed command-line arguments."""
     values = {
         "seed": args.seed,
         "name_of_model_instruct": args.model_generating_concept,
@@ -25,6 +28,7 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_generating_concept", required=True)
     parser.add_argument("--models", nargs="*", default=[])

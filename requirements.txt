@@ -1,7 +1,9 @@
-torchmonarch
-torch
-transformers
-datasets
-accelerate
-huggingface_hub
-deepeval
+torchmonarch==0.6.0
+torch==2.13.0
+transformers==5.14.1
+datasets==5.0.1
+accelerate==1.14.0
+huggingface_hub==1.8.0
+deepeval==4.1.5
+matplotlib==3.11.1
+pytest==9.1.1

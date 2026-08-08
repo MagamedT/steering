@@ -1,3 +1,5 @@
+"""Load prompts, contexts, steering jobs, and evaluation text."""
+
 from __future__ import annotations
 
 import json
@@ -55,6 +57,7 @@ def discover_steering_jobs(
 
 
 def read_lines(path: Path) -> list[str]:
+    """Read nonempty stripped lines from a text file."""
     with path.open("r", encoding="utf-8") as handle:
         return [line.strip() for line in handle if line.strip()]
 
@@ -62,6 +65,7 @@ def read_lines(path: Path) -> list[str]:
 def read_jsonl_texts(
     path: Path, n_prompts: Optional[int] = None, text_key: str = "text"
 ) -> list[str]:
+    """Read text values from a JSONL file."""
     texts: list[str] = []
     if not path.exists():
         return texts
@@ -114,6 +118,7 @@ def load_contexts_for_concept(
 
 
 def count_negative_prompts(contexts_file: str) -> Optional[int]:
+    """Count negative contexts in a context file."""
     path = Path(contexts_file)
     if path.suffix != ".jsonl":
         return None
@@ -130,6 +135,7 @@ def count_negative_prompts(contexts_file: str) -> Optional[int]:
 
 
 def _eos_token_id(tokenizer) -> Optional[int]:
+    """Choose an available end or padding token ID."""
     for attr in ("eos_token_id", "sep_token_id", "pad_token_id"):
         token_id = getattr(tokenizer, attr, None)
         if isinstance(token_id, int):

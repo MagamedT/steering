@@ -1,11 +1,13 @@
+"""Load the models used by experiment tasks. It defines which models each experiment worker needs and triggers loading them. The actual loading code is in /utils/runtime/actor.py"""
+
 from __future__ import annotations
 
-from steering.modeling import ensure_pad_token, set_left_padding
-from steering.runtime.actor import DistributedActorMixin
-from steering.runtime.placement import dtype_from_name
+from utils.modeling import ensure_pad_token, set_left_padding
+from utils.runtime.actor import DistributedActorMixin
+from utils.runtime.placement import dtype_from_name
 
-from .tasks.behavior import BehaviorActor as BinaryBehaviorEndpoints
-from .tasks.behavior_continuous import BehaviorActor as ContinuousBehaviorEndpoints
+from .tasks.concept_probs import ConceptProbsActor as BinaryConceptProbsEndpoints
+from .tasks.concept_probs_continuous import ConceptProbsActor as ContinuousConceptProbsEndpoints
 from .tasks.cross_entropy import CrossEntropyActor as CrossEntropyEndpoints
 from .tasks.log_odds import LogOddsActor as LogOddsEndpoints
 from .tasks.mmlu import MMLUActor as MMLUEndpoints
@@ -15,7 +17,7 @@ from .tasks.rescore import RescoreActor as RescoreEndpoints
 
 
 class _SingleModelActor(DistributedActorMixin):
-    """Distributed lifecycle shared by single-model task endpoints."""
+    """Load one model for several experiment tasks."""
 
     _distributed_model_attrs = ("model", "tokenizer")
 
@@ -41,23 +43,27 @@ class _SingleModelActor(DistributedActorMixin):
 
 
 class DistributedCrossEntropyActor(_SingleModelActor, CrossEntropyEndpoints):
+    """Run cross-entropy jobs with one loaded model."""
     pass
 
 
 class DistributedLogOddsActor(_SingleModelActor, LogOddsEndpoints):
+    """Run log-odds jobs with one loaded model."""
     pass
 
 
 class DistributedMMLUActor(_SingleModelActor, MMLUEndpoints):
+    """Run MMLU jobs with one loaded model."""
     pass
 
 
 class DistributedRescoreActor(_SingleModelActor, RescoreEndpoints):
+    """Run rescoring jobs with one loaded judge model."""
     pass
 
 
 class _GeneratorJudgeActor(DistributedActorMixin):
-    """Distributed lifecycle for tasks with co-resident generator and judge."""
+    """Load a generator and judge on the same GPU group."""
 
     _distributed_model_attrs = (
         "_gen_model",
@@ -104,17 +110,20 @@ class _GeneratorJudgeActor(DistributedActorMixin):
         self._judge_token_ids_10 = None
 
 
-class DistributedBehaviorActor(_GeneratorJudgeActor, BinaryBehaviorEndpoints):
+class DistributedConceptProbsActor(_GeneratorJudgeActor, BinaryConceptProbsEndpoints):
+    """Run binary concept scoring with a generator and judge."""
     pass
 
 
-class DistributedContinuousBehaviorActor(
-    _GeneratorJudgeActor, ContinuousBehaviorEndpoints
+class DistributedContinuousConceptProbsActor(
+    _GeneratorJudgeActor, ContinuousConceptProbsEndpoints
 ):
+    """Run continuous concept scoring with a generator and judge."""
     pass
 
 
 class DistributedPromptActor(DistributedActorMixin, PromptEndpoints):
+    """Generate prompt datasets with a distributed model."""
     _distributed_model_attrs = ("model", "tok")
 
     def __init__(
@@ -139,6 +148,7 @@ class DistributedPromptActor(DistributedActorMixin, PromptEndpoints):
 
 
 class DistributedTokenActor(DistributedActorMixin, TokenProbabilityEndpoints):
+    """Run token-probability jobs with one loaded model."""
     _distributed_model_attrs = ("model", "tokenizer")
 
     def __init__(

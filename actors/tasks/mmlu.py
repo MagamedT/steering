@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Evaluate steered models on MMLU tasks."""
+
 import asyncio
 import contextlib
 import json
@@ -11,15 +13,15 @@ import torch
 import numpy as np
 from monarch.actor import Actor, endpoint
 
-from steering.mmlu import disable_tqdm, extract_choice, resolve_tasks, task_scores_to_dict
-from steering.modeling import find_block_list, load_steering_vector
-from steering.naming import model_slug
+from utils.mmlu import disable_tqdm, extract_choice, resolve_tasks, task_scores_to_dict
+from utils.modeling import find_block_list, load_steering_vector
+from utils.naming import model_slug
 
-# --- Make logs safe for hyperactor_mesh (avoid Unicode tqdm bars, HF datasets bars, etc.) ---
+# Disable progress bars that can corrupt distributed logs.
 os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TQDM_DISABLE", "1")
 
-# DeepEval telemetry/tracing off (best-effort)
+# Disable optional DeepEval telemetry.
 os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "1")
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 os.environ.setdefault("OTEL_TRACES_EXPORTER", "none")
@@ -32,25 +34,28 @@ disable_tqdm()
 
 @dataclass
 class MMLUEvalConfig:
+    """Settings for MMLU evaluation."""
     dtype: str = "float32"
     seed: int = 42
     alpha_start: float = -10.0
     alpha_end: float = 10.0
     alpha_steps: int = 200
     tasks: Optional[Sequence[str]] = None  # None/[]/"all" => all tasks
+    max_problems_per_task: int | None = None
     n_shots: int = 5
     apply_last_token_only: bool = False
     max_new_tokens: int = 8
     temperature: float = 0.0
     batch_size: int = 64
     use_chat_template: bool = True
-    progress_every: int = 1  # mailbox yield every N alphas
+    progress_every: int = 1  # yield every N alpha values
 
 
 class MMLUActor(Actor):
-    """MMLU endpoints used by the distributed actor."""
+    """Evaluate a loaded model on MMLU."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
+        """Check that the requested model is already loaded."""
         if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
         raise RuntimeError("Distributed actor was initialized for a different model")
@@ -67,7 +72,9 @@ class MMLUActor(Actor):
         layer_path: Optional[str] = None,
         cfg_dict: Optional[dict] = None,
         rank_hint: int = 0,
+        exact_layer_idx: Optional[int] = None,
     ):
+        """Evaluate selected layers and steering strengths on MMLU."""
         cfg = MMLUEvalConfig(**(cfg_dict or {}))
         cfg.n_shots = int(min(max(cfg.n_shots, 0), 5))
         cfg.batch_size = int(max(cfg.batch_size, 1))
@@ -95,7 +102,14 @@ class MMLUActor(Actor):
 
         blocks = find_block_list(model, override_path=layer_path)
         n_blocks = len(blocks)
-        if block_idx_to_steer == None:
+        if exact_layer_idx is not None:
+            exact_layer_idx = int(exact_layer_idx)
+            if not 0 <= exact_layer_idx < n_blocks:
+                raise ValueError(
+                    f"Layer {exact_layer_idx} is outside [0, {n_blocks - 1}]."
+                )
+            block_idx_to_steer = [exact_layer_idx]
+        elif block_idx_to_steer is None:
             block_idx_to_steer = list(range(n_blocks))
         else:
             # Interpret integer input as "sample this many layers uniformly across depth".
@@ -124,8 +138,9 @@ class MMLUActor(Actor):
         progress_mod = max(1, int(cfg.progress_every))
         eval_counter = 0
 
-        # ---- DeepEval model wrapper (must return a SINGLE LETTER for MMLU exact-match scoring) ----
+        # Adapt the model to DeepEval's one-letter answer format.
         class _SteeredLLM(DeepEvalBaseLLM):
+            """Adapt the steered model to the interface expected by MMLU."""
             def __init__(
                 self,
                 *,
@@ -153,12 +168,15 @@ class MMLUActor(Actor):
                 self._device = next(model.parameters()).device
 
             def load_model(self):
+                """Return the loaded model."""
                 return self._model
 
             def get_model_name(self):
+                """Return the display name used by the evaluator."""
                 return self._name
 
             def _maybe_chat_wrap(self, prompt: str) -> str:
+                """Apply the tokenizer chat template when requested."""
                 if not self._use_chat_template:
                     return prompt
                 if hasattr(self._tokenizer, "apply_chat_template"):
@@ -173,6 +191,7 @@ class MMLUActor(Actor):
                 return prompt
 
             def _make_hook(self):
+                """Create a hook that applies the steering vector."""
                 alpha_vec = (self._alpha * self._steer_vec).to(self._device)
 
                 def hook(module, inputs, output):
@@ -194,6 +213,7 @@ class MMLUActor(Actor):
                 return hook
 
             def _generate_letters(self, prompts: list[str]) -> list[str]:
+                """Generate one multiple-choice letter for each prompt."""
                 prompts = [self._maybe_chat_wrap(p) for p in prompts]
 
                 old_side = getattr(self._tokenizer, "padding_side", "right")
@@ -236,14 +256,17 @@ class MMLUActor(Actor):
 
             # DeepEval calls these
             def generate(self, prompt: str, schema=None) -> str:
-                # schema is ignored for MMLU but kept for API compatibility
+                """Generate one MMLU answer."""
+                # Schema is unused for MMLU but required by the interface.
                 return self._generate_letters([prompt])[0]
 
             async def a_generate(self, prompt: str, schema=None) -> str:
+                """Generate one MMLU answer without blocking the event loop."""
                 loop = asyncio.get_running_loop()
                 return await loop.run_in_executor(None, self.generate, prompt)
 
             def batch_generate(self, prompts: list[str]) -> list[str]:
+                """Generate MMLU answers for a prompt batch."""
                 return self._generate_letters(prompts)
 
         for block_idx in block_idx_to_steer:
@@ -273,7 +296,15 @@ class MMLUActor(Actor):
 
                 def run_eval():
                     # DeepEval internally drives prompt generation; wrapper injects steering via hook.
-                    benchmark = MMLU(tasks=tasks, n_shots=int(cfg.n_shots))
+                    benchmark_options = {
+                        "tasks": tasks,
+                        "n_shots": int(cfg.n_shots),
+                    }
+                    if cfg.max_problems_per_task is not None:
+                        benchmark_options["n_problems_per_task"] = int(
+                            cfg.max_problems_per_task
+                        )
+                    benchmark = MMLU(**benchmark_options)
 
                     # Newer DeepEval: evaluate() returns score; older: sets .overall_score
                     # Suppress noisy internal printing.
@@ -348,6 +379,7 @@ class MMLUActor(Actor):
                 "prediction_counts": prediction_counts,
                 "tasks": task_ids,
                 "n_shots": int(cfg.n_shots),
+                "max_problems_per_task": cfg.max_problems_per_task,
                 "apply_last_token_only": bool(cfg.apply_last_token_only),
                 "max_new_tokens": int(cfg.max_new_tokens),
                 "temperature": float(cfg.temperature),

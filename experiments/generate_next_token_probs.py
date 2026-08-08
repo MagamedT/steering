@@ -1,3 +1,5 @@
+"""Command-line entry point for next-token probability curves."""
+
 import argparse
 import asyncio
 from pathlib import Path
@@ -5,12 +7,13 @@ from pathlib import Path
 from monarch.actor import shutdown_context
 
 from actors.tasks.next_token_probs import TokenPlotConfig
-from steering.data import discover_steering_jobs
-from steering.runtime.pool import add_distributed_args
+from utils.data import discover_steering_jobs
+from utils.runtime.pool import add_distributed_args
 from experiments.runners import run_next_token_probs
 
 
 async def main_async(args):
+    """Run the experiment from parsed command-line arguments."""
     config = TokenPlotConfig(
         dtype=args.dtype,
         seed=args.seed,
@@ -40,6 +43,7 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--steer_dir", default="steering_vectors")

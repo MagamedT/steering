@@ -1,3 +1,5 @@
+"""Recompute concept probabilities for saved completions."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,11 +9,12 @@ from pathlib import Path
 import numpy as np
 from monarch.actor import Actor, endpoint
 
-from .behavior_continuous import BehaviorConfig
+from .concept_probs_continuous import ConceptProbsConfig
 from .rubric_judge import RubricJudgeDetails, rubric_completion_scores
 
 
 def _means(scores: np.ndarray, ctx_is_positive: np.ndarray):
+    """Compute overall, positive, negative, and matched score means."""
     by_context = np.mean(scores, axis=2, dtype=np.float64).astype(np.float32)
     mean_all = np.mean(by_context, axis=0, dtype=np.float64).astype(np.float32)
     if not bool((ctx_is_positive >= 0).all()):
@@ -29,7 +32,7 @@ def _means(scores: np.ndarray, ctx_is_positive: np.ndarray):
 
 
 class RescoreActor(Actor):
-    """Continuous concept-probability rescoring endpoint."""
+    """Rescore saved completions with a judge model."""
 
     @endpoint
     async def rescore_file(
@@ -39,31 +42,51 @@ class RescoreActor(Actor):
         output_root: str,
         cfg_dict: dict,
     ) -> dict | None:
-        cfg = BehaviorConfig(**cfg_dict)
+        """Score saved completions again and write a new result file."""
+        cfg = ConceptProbsConfig(**cfg_dict)
         source = Path(path)
         with np.load(source, allow_pickle=True) as data:
             payload = {key: data[key] for key in data.files}
 
         meta = json.loads(str(payload["meta"]))
         texts = np.asarray(payload["completion_texts_by_ctx"], dtype=object)
-        details = rubric_completion_scores(
-            self.tokenizer,
-            self.model,
-            [str(value) for value in texts.reshape(-1)],
-            str(meta["concept"]),
-            cfg,
-            instructions=None,
-            return_details=True,
-            tp_mesh=getattr(self, "tp_mesh", None),
-        )
-        if not isinstance(details, RubricJudgeDetails):
-            raise RuntimeError("Rubric judge returned no scoring diagnostics")
-        await asyncio.sleep(0)
+        if texts.ndim != 3 or texts.shape[-1] == 0:
+            raise ValueError("Saved completion texts must have shape [context, alpha, sample]")
+
+        # Match the original run's one-context, one-alpha judge batches. Different
+        # padding widths can otherwise cause small bfloat16 score changes.
+        grouped_texts = texts.reshape(-1, texts.shape[-1])
+        grouped_scores = np.empty(grouped_texts.shape, dtype=np.float32)
+        grouped_raw_json = np.empty(grouped_texts.shape, dtype=object)
+        grouped_true_logits = np.empty(grouped_texts.shape, dtype=np.float32)
+        grouped_false_logits = np.empty(grouped_texts.shape, dtype=np.float32)
+        grouped_pair_mass = np.empty(grouped_texts.shape, dtype=np.float32)
+        for group_index, group in enumerate(grouped_texts):
+            details = rubric_completion_scores(
+                self.tokenizer,
+                self.model,
+                [str(value) for value in group],
+                str(meta["concept"]),
+                cfg,
+                instructions=None,
+                return_details=True,
+                tp_mesh=getattr(self, "tp_mesh", None),
+            )
+            if not isinstance(details, RubricJudgeDetails):
+                raise RuntimeError("Rubric judge returned no scoring diagnostics")
+            if details.scores.numel() != group.size:
+                raise RuntimeError("Rubric judge returned an unexpected number of scores")
+            grouped_scores[group_index] = details.scores.numpy()
+            grouped_raw_json[group_index] = np.asarray(details.raw_json, dtype=object)
+            grouped_true_logits[group_index] = details.true_logits.numpy()
+            grouped_false_logits[group_index] = details.false_logits.numpy()
+            grouped_pair_mass[group_index] = details.pair_mass.numpy()
+            await asyncio.sleep(0)
 
         if not self.is_leader:
             return None
 
-        scores = details.scores.numpy().reshape(texts.shape).astype(np.float32)
+        scores = grouped_scores.reshape(texts.shape)
         ctx_is_positive = np.asarray(payload["ctx_is_positive"], dtype=np.int8)
         by_context, mean_all, mean_negative, mean_positive, mean_match = _means(
             scores, ctx_is_positive
@@ -76,10 +99,10 @@ class RescoreActor(Actor):
             mean_negative=mean_negative,
             mean_positive=mean_positive,
             mean_match=mean_match,
-            judge_raw_json=np.asarray(details.raw_json, dtype=object).reshape(texts.shape),
-            judge_true_logits=details.true_logits.numpy().reshape(texts.shape),
-            judge_false_logits=details.false_logits.numpy().reshape(texts.shape),
-            judge_pair_mass=details.pair_mass.numpy().reshape(texts.shape),
+            judge_raw_json=grouped_raw_json.reshape(texts.shape),
+            judge_true_logits=grouped_true_logits.reshape(texts.shape),
+            judge_false_logits=grouped_false_logits.reshape(texts.shape),
+            judge_pair_mass=grouped_pair_mass.reshape(texts.shape),
         )
         meta["judge"] = {
             "method": "rubric_boolean_probability",

@@ -1,3 +1,5 @@
+"""Compare next-token likelihoods for positive and negative prompts."""
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,24 +10,26 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
-from steering.batching import chunked
-from steering.data import read_jsonl_texts
-from steering.naming import model_slug
+from utils.batching import chunked
+from utils.data import read_jsonl_texts
+from utils.naming import model_slug
 from .next_token_probs import ensure_full_vocab_logits
 
 @dataclass
 class LogOddsConfig:
+    """Settings for token log-odds."""
     dtype: str = "float32"
     seed: int = 42
     batch_size: int = 100
     max_length: int = 100
     top_k: int = -1
-    progress_every: int = 10  # mailbox yield
+    progress_every: int = 10  # yield every N batches
 
 class LogOddsActor(Actor):
-    """Computes token-level log-odds (no steering) and saves top-k."""
+    """Compute token log-odds and save the strongest tokens."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
+        """Check that the requested model is already loaded."""
         if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
         raise RuntimeError("Distributed actor was initialized for a different model")
@@ -41,6 +45,7 @@ class LogOddsActor(Actor):
         cfg_dict: Optional[dict] = None,
         rank_hint: int = 0,
     ):
+        """Compute and save token log-odds for one concept."""
         cfg = LogOddsConfig(**(cfg_dict or {}))
         torch.manual_seed(cfg.seed + int(rank_hint))
         if torch.cuda.is_available():

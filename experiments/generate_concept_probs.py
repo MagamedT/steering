@@ -1,20 +1,24 @@
+"""Command-line entry point for binary concept-probability curves."""
+
 import argparse
 import asyncio
 from pathlib import Path
 
 from monarch.actor import shutdown_context
 
-from actors.tasks.behavior import BehaviorConfig
-from steering.data import discover_steering_jobs
-from steering.runtime.pool import add_distributed_args
-from experiments.runners import run_behavior
+from actors.tasks.concept_probs import ConceptProbsConfig
+from utils.data import discover_steering_jobs
+from utils.runtime.pool import add_distributed_args
+from experiments.runners import run_concept_probs
 
 
 async def main_async(args):
-    config = BehaviorConfig(
+    """Run the experiment from parsed command-line arguments."""
+    config = ConceptProbsConfig(
         judge_model_name=args.judge_model,
         generator_dtype=args.dtype,
         judge_dtype=args.dtype,
+        seed=getattr(args, "seed", 0),
     )
     steer_dir = Path(args.steer_dir)
     out_dir = Path(args.out_dir)
@@ -26,7 +30,7 @@ async def main_async(args):
     jobs = discover_steering_jobs(steer_dir, list(args.models))
     if not jobs:
         raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
-    await run_behavior(
+    await run_concept_probs(
         args,
         config,
         jobs,
@@ -38,14 +42,17 @@ async def main_async(args):
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--judge_model", required=True)
     parser.add_argument("--steer_dir", default="steering_vectors")
     parser.add_argument("--contexts_file", default="data/contexts.jsonl")
-    parser.add_argument("--out_dir", default="behavior_data")
+    parser.add_argument("--out_dir", default="concept_probs_data")
     parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--layer", type=int, default=None)
     parser.add_argument("--layer_path", default=None)
+    parser.add_argument("--seed", type=int, default=ConceptProbsConfig.seed)
     add_distributed_args(parser)
     return parser.parse_args()
 

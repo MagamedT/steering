@@ -1,6 +1,8 @@
+"""Make model workers and experiment settings available to other modules."""
+
 from .model_actors import (
-    DistributedBehaviorActor,
-    DistributedContinuousBehaviorActor,
+    DistributedConceptProbsActor,
+    DistributedContinuousConceptProbsActor,
     DistributedCrossEntropyActor,
     DistributedLogOddsActor,
     DistributedMMLUActor,
@@ -8,8 +10,8 @@ from .model_actors import (
     DistributedRescoreActor,
     DistributedTokenActor,
 )
-from .tasks.behavior import BehaviorConfig
-from .tasks.behavior_continuous import BehaviorConfig as ContinuousBehaviorConfig
+from .tasks.concept_probs import ConceptProbsConfig
+from .tasks.concept_probs_continuous import ConceptProbsConfig as ContinuousConceptProbsConfig
 from .tasks.cross_entropy import CrossEntropyPlotConfig
 from .tasks.log_odds import LogOddsConfig
 from .tasks.mmlu import MMLUEvalConfig
@@ -18,11 +20,11 @@ from .tasks.prompts import GenConfig
 from .tasks.steering import DistributedSteeringActor, SteeringConfig
 
 __all__ = [
-    "BehaviorConfig",
-    "ContinuousBehaviorConfig",
+    "ConceptProbsConfig",
+    "ContinuousConceptProbsConfig",
     "CrossEntropyPlotConfig",
-    "DistributedBehaviorActor",
-    "DistributedContinuousBehaviorActor",
+    "DistributedConceptProbsActor",
+    "DistributedContinuousConceptProbsActor",
     "DistributedCrossEntropyActor",
     "DistributedLogOddsActor",
     "DistributedMMLUActor",

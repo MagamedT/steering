@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-download_one_fineweb_parquet.py
-
-Downloads a single parquet shard from a FineWeb dataset repo on Hugging Face.
-
-Example:
-  python -m experiments.generate_eval_dataset \
-    --dataset HuggingFaceFW/fineweb \
-    --remote_name sample-10BT \
-    --split train \
-    --file_idx 0 \
-    --out_dir ./fineweb_eval_parquet
-"""
+"""Download one parquet shard for cross-entropy evaluation."""
 
 from __future__ import annotations
 
@@ -23,6 +11,7 @@ from huggingface_hub import HfApi, hf_hub_download
 
 
 def parse_args():
+    """Parse command-line arguments."""
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", type=str, default="HuggingFaceFW/fineweb-edu",
                    help="HF dataset repo id, e.g. HuggingFaceFW/fineweb or HuggingFaceFW/fineweb-edu")
@@ -40,6 +29,7 @@ def parse_args():
 
 
 def _filter_parquets(files: List[str], remote_name: str, split: str, contains: str) -> List[str]:
+    """Filter dataset files to matching parquet shards."""
     parq = [f for f in files if f.endswith(".parquet")]
     if remote_name:
         parq = [f for f in parq if remote_name in f]
@@ -55,6 +45,7 @@ def _filter_parquets(files: List[str], remote_name: str, split: str, contains: s
 
 
 def main():
+    """Download the selected parquet shard."""
     args = parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

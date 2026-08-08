@@ -1,3 +1,5 @@
+"""Build steering vectors from positive and negative activations."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,15 +9,16 @@ from pathlib import Path
 import torch
 from monarch.actor import Actor, endpoint
 
-from steering.batching import chunked
-from steering.data import read_jsonl_texts
-from steering.modeling import find_block_list
-from steering.naming import model_slug
-from steering.runtime.actor import DistributedActorMixin
+from utils.batching import chunked
+from utils.data import read_jsonl_texts
+from utils.modeling import find_block_list
+from utils.naming import model_slug
+from utils.runtime.actor import DistributedActorMixin
 
 
 @dataclass
 class SteeringConfig:
+    """Settings for steering-vector extraction."""
     batch_size: int = 50
     max_length: int = 300
     dtype: str = "float32"
@@ -28,7 +31,7 @@ class SteeringConfig:
 
 
 class DistributedSteeringActor(DistributedActorMixin, Actor):
-    """A steering-vector logical actor spanning one or more GPUs."""
+    """Compute steering vectors on one or more GPUs."""
 
     _distributed_model_attrs = ("model", "tokenizer")
 
@@ -63,8 +66,9 @@ class DistributedSteeringActor(DistributedActorMixin, Actor):
         layer_path: str | None,
         logical_rank: int,
     ) -> dict | None:
+        """Compute and save steering vectors for one concept."""
         cfg = SteeringConfig(**cfg_dict)
-        # TP ranks must see identical inputs; replica ranks get distinct seeds.
+        # Ranks in one replica share inputs; different replicas use different seeds.
         torch.manual_seed(cfg.seed + int(logical_rank))
         torch.cuda.manual_seed_all(cfg.seed + int(logical_rank))
 

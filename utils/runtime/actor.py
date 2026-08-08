@@ -1,3 +1,5 @@
+"""Load one model copy on one or more GPUs."""
+
 from __future__ import annotations
 
 import os
@@ -12,7 +14,7 @@ from .placement import dtype_from_name
 
 
 class DistributedActorMixin:
-    """Shared topology and model loading for logical actors using 1..N GPUs."""
+    """Share model loading and multi-GPU setup."""
 
     _distributed_model_attrs: tuple[str, ...] = ()
 
@@ -21,6 +23,7 @@ class DistributedActorMixin:
         logical_actors: int,
         gpus_per_actor: int,
     ) -> None:
+        """Set rank roles and initialize tensor parallelism when needed."""
         torch.backends.cuda.matmul.allow_tf32 = True
         self.logical_actors = int(logical_actors)
         self.gpus_per_actor = int(gpus_per_actor)
@@ -37,7 +40,7 @@ class DistributedActorMixin:
 
         if not torch.cuda.is_available():
             if self.logical_actors != 1 or self.gpus_per_actor != 1:
-                raise RuntimeError("CPU fallback supports one single-rank logical actor")
+                raise RuntimeError("CPU fallback supports one model worker using one process")
             self.device = torch.device("cpu")
             return
 
@@ -61,6 +64,7 @@ class DistributedActorMixin:
         local_files_only: bool = False,
         trust_remote_code: bool = False,
     ):
+        """Load a tokenizer and model for this actor GPU group."""
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             use_fast=False,
@@ -90,6 +94,7 @@ class DistributedActorMixin:
         return tokenizer, model
 
     def _clear_distributed_models(self, extra_attrs: Iterable[str] = ()) -> None:
+        """Release loaded model references and cached GPU memory."""
         for attr in (*self._distributed_model_attrs, *tuple(extra_attrs)):
             if hasattr(self, attr):
                 setattr(self, attr, None)
@@ -98,6 +103,7 @@ class DistributedActorMixin:
 
     @endpoint
     async def describe(self) -> dict:
+        """Return this actor rank and model information."""
         return {
             "global_rank": self.global_rank,
             "local_rank": self.local_rank,
@@ -109,6 +115,7 @@ class DistributedActorMixin:
 
     @endpoint
     async def close(self) -> None:
+        """Release models and close the distributed process group."""
         self._clear_distributed_models()
         if dist.is_initialized():
             dist.destroy_process_group()

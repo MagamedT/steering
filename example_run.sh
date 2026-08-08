@@ -1,4 +1,5 @@
 #!/bin/bash
+# Run the full steering experiment pipeline on a Slurm cluster.
 #SBATCH -J steeringJob
 #SBATCH -c 16
 #SBATCH --mem=256G
@@ -38,7 +39,7 @@ for SEED in "${SEEDS[@]}"; do
   LOG_ODDS_DIR="${RUN_DIR}/log_odds"
   XENT_DIR="${RUN_DIR}/cross_entropy"
   MMLU_DIR="${RUN_DIR}/mmlu"
-  BEHAVIOR_DIR="${RUN_DIR}/behavior_data"
+  CONCEPT_PROBS_DIR="${RUN_DIR}/concept_probs_data"
 
   mkdir -p "${PROMPTS_DIR}" "${STEERING_DIR}" "${PLOT_DIR}" "${LOG_ODDS_DIR}" "${XENT_DIR}" "${MMLU_DIR}"
 
@@ -68,7 +69,7 @@ for SEED in "${SEEDS[@]}"; do
   --judge_model "${MODEL_GENERATING_CONCEPT}" \
   --steer_dir "${STEERING_DIR}" \
   --contexts_file "${CONTEXTS_FILE}" \
-  --out_dir "${BEHAVIOR_DIR}" \
+  --out_dir "${CONCEPT_PROBS_DIR}" \
   --layers 6
 
   python3 "${CODE_ROOT}/experiments/generate_log_odds.py" \
