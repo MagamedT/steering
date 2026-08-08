@@ -10,7 +10,8 @@ import torch
 import torch.nn.functional as F
 from monarch.actor import Actor, endpoint
 
-from .utils import find_block_list, model_slug, load_model_and_tokenizer, load_steer_vector, iter_eval_blocks_from_parquet
+from .utils import find_block_list, model_slug, load_steer_vector, iter_eval_blocks_from_parquet
+from .next_token_probs_actor import ensure_full_vocab_logits
 
 
 @dataclass
@@ -43,26 +44,12 @@ class CrossEntropyPlotConfig:
     progress_every: int = 10       # mailbox yield every N forwards
 
 class CrossEntropyActor(Actor):
-    """
-    One actor per GPU. Caches last loaded (model, dtype).
-    Exposes endpoint to compute cross-entropy-vs-alpha curves for many layers.
-    """
-    def __init__(self):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        self.current_model_name = None
-        self.current_dtype = None
-        self.tokenizer = None
-        self.model = None
+    """Cross-entropy endpoints used by the distributed actor."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
-        if self.model is not None and self.current_model_name == model_name and self.current_dtype == dtype_str:
+        if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
-        self.tokenizer = None
-        self.model = None
-        torch.cuda.empty_cache()
-        self.tokenizer, self.model = load_model_and_tokenizer(model_name, dtype_str)
-        self.current_model_name = model_name
-        self.current_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different model")
 
     @endpoint
     async def compute_cross_entropy_curves(
@@ -87,6 +74,7 @@ class CrossEntropyActor(Actor):
         tokenizer, model = self.tokenizer, self.model
         model.eval()
 
+        device = getattr(self, "device", next(model.parameters()).device)
         blocks = find_block_list(model, override_path=layer_path)
         n_blocks = len(blocks)
         if block_idx_to_steer == None:
@@ -103,7 +91,8 @@ class CrossEntropyActor(Actor):
         alpha_batch_size = int(cfg.alpha_batch_size)
 
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
-        save_root.mkdir(parents=True, exist_ok=True)
+        if self.is_leader:
+            save_root.mkdir(parents=True, exist_ok=True)
 
         steer_dir_path = Path(steer_dir)
         forward_counter = 0
@@ -113,7 +102,7 @@ class CrossEntropyActor(Actor):
         # Pre-load all steering vectors once (so we can scan the parquet once).
         block_idx_to_steer = [int(i) for i in block_idx_to_steer]
         steer_vecs_gpu = {
-            int(b): load_steer_vector(steer_dir_path, model_name, concept_slug, int(b)).to("cuda", non_blocking=True)
+            int(b): load_steer_vector(steer_dir_path, model_name, concept_slug, int(b)).to(device, non_blocking=True)
             for b in block_idx_to_steer
         }
 
@@ -124,7 +113,7 @@ class CrossEntropyActor(Actor):
         blocks_seen = 0
 
         # Keep α grid resident on GPU
-        alphas_cuda = alphas.to("cuda", non_blocking=True)
+        alphas_cuda = alphas.to(device, non_blocking=True)
 
         def make_hook(alpha_per_sample, steer_vec, mask):
             def _hook(module, inputs, output):
@@ -151,8 +140,8 @@ class CrossEntropyActor(Actor):
             blocks_seen += B
             token_amount += float(B * T)
 
-            input_tokens = input_tokens.to("cuda", non_blocking=True)
-            label_tokens = label_tokens.to("cuda", non_blocking=True)
+            input_tokens = input_tokens.to(device, non_blocking=True)
+            label_tokens = label_tokens.to(device, non_blocking=True)
 
             for alpha_0 in range(0, alpha_amount, alpha_batch_size):
                 alpha_1 = min(alpha_amount, alpha_0 + alpha_batch_size)
@@ -184,7 +173,11 @@ class CrossEntropyActor(Actor):
 
                     with torch.inference_mode():
                         # IMPORTANT: use_cache=False and no attention_mask (no padding).
-                        logits = model(input_ids=input_rep, use_cache=False).logits.to(torch.float32)
+                        logits = ensure_full_vocab_logits(
+                            model(input_ids=input_rep, use_cache=False).logits,
+                            int(model.config.vocab_size),
+                            getattr(self, "tp_mesh", None),
+                        ).to(torch.float32)
                         loss = F.cross_entropy(
                             logits.reshape(-1, logits.shape[-1]),
                             labels_rep.reshape(-1),
@@ -210,6 +203,10 @@ class CrossEntropyActor(Actor):
             )
 
         # Save one curve per layer
+        if not self.is_leader:
+            torch.cuda.empty_cache()
+            return None
+
         for block_idx in block_idx_to_steer:
             cross_entropy = (nll_per_alpha[int(block_idx)] / token_amount).numpy()
             perplexity = np.exp(cross_entropy)
@@ -238,6 +235,7 @@ class CrossEntropyActor(Actor):
                 },
                 "baseline_alpha": 0.0,
                 "baseline_cross_entropy": cross_entropy0,
+                "tensor_parallel_size": getattr(self, "gpus_per_actor", 1),
             }
             np.savez_compressed(
                 out_path,

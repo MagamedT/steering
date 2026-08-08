@@ -5,7 +5,6 @@ from functools import partialmethod
 from pathlib import Path
 import torch.nn as nn
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
 if TYPE_CHECKING:
@@ -165,12 +164,6 @@ def load_contexts_for_concept(contexts_file: str, concept_slug: str, concept_lab
     return contexts, source_line_indices
 
 
-def _from_pretrained_with_dtype(cls, model_name: str, *, dtype, **kwargs):
-    try:
-        return cls.from_pretrained(model_name, dtype=dtype, **kwargs)
-    except TypeError:
-        return cls.from_pretrained(model_name, torch_dtype=dtype, **kwargs)
-
 def find_block_list(model: nn.Module, override_path: Optional[str] = None) -> nn.ModuleList:
     if override_path:
         obj = model
@@ -209,29 +202,6 @@ def find_block_list(model: nn.Module, override_path: Optional[str] = None) -> nn
 
     raise ValueError("Could not locate transformer block ModuleList; provide --layer_path.")
 
-
-def load_model_and_tokenizer(model_name: str, dtype_str: str = "float32") -> Tuple[AutoTokenizer, nn.Module]:
-    tok = AutoTokenizer.from_pretrained(model_name, use_fast=False)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token or tok.bos_token
-
-    dtype = torch.float32 if dtype_str == "float32" else torch.bfloat16
-    common = dict(low_cpu_mem_usage=True, device_map={"": 0})
-    try:
-        model = _from_pretrained_with_dtype(
-            AutoModelForCausalLM, model_name, dtype=dtype,
-            attn_implementation="flash_attention_2", **common
-        )
-    except Exception:
-        model = _from_pretrained_with_dtype(
-            AutoModelForCausalLM, model_name, dtype=dtype,
-            attn_implementation="sdpa", **common
-        )
-    model.eval()
-    model.generation_config.pad_token_id = tok.pad_token_id
-    if tok.eos_token_id is not None:
-        model.generation_config.eos_token_id = tok.eos_token_id
-    return tok, model
 
 def load_steer_vector(steer_dir: Path, model_name: str, concept_slug: str, layer_idx: int) -> torch.Tensor:
     mslug = model_slug(model_name)

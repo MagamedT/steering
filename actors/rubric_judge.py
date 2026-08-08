@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 import torch
 
+from .next_token_probs_actor import ensure_full_vocab_logits
 
 SINGLE_ITEM_RUBRIC_JUDGE_PROMPT = """
 Decide whether the single rubric item is met by the assistant response.
@@ -299,6 +300,7 @@ def rubric_completion_scores(
     *,
     instructions: Sequence[str] | None = None,
     return_details: bool = False,
+    tp_mesh=None,
 ) -> torch.Tensor | RubricJudgeDetails:
     """Score each completion at its generated RubricARROW verdict position.
 
@@ -440,7 +442,11 @@ def rubric_completion_scores(
                     use_cache=False,
                     logits_to_keep=1,
                 )
-            logits = outputs.logits
+            logits = ensure_full_vocab_logits(
+                outputs.logits,
+                int(model.config.vocab_size),
+                tp_mesh,
+            )
             if logits.ndim != 3 or logits.shape[0] != len(parsed_rows):
                 raise RuntimeError("Unexpected Rubric judge logits shape.")
             final_logits = logits[:, -1, :].float()

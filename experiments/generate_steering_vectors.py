@@ -1,194 +1,60 @@
 import argparse
 import asyncio
-from dataclasses import asdict
-from pathlib import Path
-import torch
-from monarch.actor import shutdown_context, this_host
 
-from actors.steering_vector_actor import SteeringActor, SteeringConfig
-from actors.utils import discover_concepts
-from experiments.launcher_utils import run_ranked_jobs
+from monarch.actor import shutdown_context
+
+from actors.distributed_steering_actor import SteeringConfig
+from experiments.distributed_runtime import add_distributed_args
+from experiments.unified_runs import run_steering
+
 
 def pair_jobs(models, concepts, mode="product"):
-    """
-    Build (model, concept_slug, concept_label) tuples.
-
-    modes:
-    - "product": cartesian product of all models with all (slug, label) concepts.
-    - "zip": pair elements one-to-one up to the shorter list length.
-    - "zip_cycle": pair across the longer list length, cycling through the shorter one.
-
-    Returns a list of (model, slug, label) tuples.
-    """
-    jobs = []
     if mode == "product":
-        for model in models:
-            for slug, label in concepts:
-                jobs.append((model, slug, label))
-    elif mode == "zip":
-        for idx, model in enumerate(models[:len(concepts)]):
-            slug, label = concepts[idx]
-            jobs.append((model, slug, label))
-    else:  # zip_cycle
-        L = max(len(models), len(concepts))
-        for i in range(L):
-            model = models[i % len(models)]
-            slug, label = concepts[i % len(concepts)]
-            jobs.append((model, slug, label))
-    return jobs
+        return [
+            (model, slug, label)
+            for model in models
+            for slug, label in concepts
+        ]
+    if mode == "zip":
+        return [
+            (model, *concepts[index])
+            for index, model in enumerate(models[: len(concepts)])
+        ]
+    length = max(len(models), len(concepts))
+    return [
+        (models[index % len(models)], *concepts[index % len(concepts)])
+        for index in range(length)
+    ]
+
 
 async def main_async(args):
-    if getattr(args, "model_parallel_size", "1") == "auto":
-        from experiments.dynamic_steering_vectors import run_dynamic
-
-        await run_dynamic(args)
-        return
-
-    cfg_values = {
-        "seed": args.seed,
-        "contrastive": args.contrastive,
-    }
-    for name in (
-        "batch_size",
-        "max_length",
-        "dtype",
-        "n_positive",
-        "n_negative",
-        "block_per_pass",
-        "progress_every",
-    ):
-        if hasattr(args, name):
-            cfg_values[name] = getattr(args, name)
-    cfg = SteeringConfig(**cfg_values)
-
-    in_dir = Path(args.in_dir)
-    if not in_dir.exists():
-        raise RuntimeError(f"--in_dir '{in_dir}' does not exist")
-
-    concepts = discover_concepts(in_dir)
-    if not concepts:
-        raise RuntimeError(f"No concept pairs (*.related.jsonl & *.unrelated.jsonl) found under {in_dir}")
-
-    models = list(args.models)
-    # Pairing controls whether we run full cartesian product or a zipped pairing.
-    jobs = pair_jobs(models, concepts, mode=args.pairing)
-
-    visible = torch.cuda.device_count()
-    if visible < 1:
-        raise RuntimeError("No CUDA devices visible.")
-    use_gpus = min(visible, len(jobs))
-    if args.max_gpus and args.max_gpus > 0:
-        use_gpus = min(use_gpus, args.max_gpus)
-
-    mesh = this_host().spawn_procs(per_host={args.dim: use_gpus})
-    print(mesh.to_table(), flush=True)
-    steerer = mesh.spawn("steer", SteeringActor)
-
-    def actor_for(rank: int):
-        return steerer.slice(**{args.dim: rank})
-
-    async def run_one(rank: int, model_name: str, concept_slug: str, concept_label: str):
-        return await actor_for(rank).compute_for.call_one(
-            model_name,
-            concept_slug,
-            concept_label,
-            # [None] means "all layers" and is expanded by the actor.
-            [None] if args.layers == [None] else [int(i) for i in args.layers],
-            asdict(cfg),
-            str(in_dir),
-            args.save_dir,
-            args.layer_path,
-            rank,  # rank_hint
-        )
-
-    # Dynamic scheduler: each GPU immediately pulls the next pending job.
-    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
-        if isinstance(res, Exception):
-            print(f"[gpu {rank}] EXCEPTION: {res}", flush=True)
-            raise res
-        if isinstance(res, dict) and "error" in res:
-            print(f"[gpu {rank}] ERROR: {res['error']}", flush=True)
-        else:
-            print(
-                f"[gpu {res['rank']}] model='{res['model']}' concept='{res['concept']}' "
-                f"layers={len(res['layers'])} saved={len(res['saved'])} files",
-                flush=True,
-            )
+    await run_steering(args)
 
 
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--models", nargs="+", required=True,
-                   help="HF model ids or local paths (space-separated)")
-    p.add_argument("--in_dir", default="prompts",
-                   help="Directory containing <slug>.related.jsonl and <slug>.unrelated.jsonl")
-    p.add_argument("--save_dir", default="steering_vectors",
-                   help="Where to save layer_<i>.pt steering vectors")
-    p.add_argument("--layers", nargs="+", default=[None],
-                   help="Layer indices (e.g., 5 10 15) or [None] to compute for all blocks. No over input are valid")
-    p.add_argument("--layer_path", default=None,
-                   help="Optional override to the block ModuleList (e.g., 'model.layers').")
-
-    # Pairing & scheduling
-    p.add_argument("--pairing", choices=["product", "zip", "zip_cycle"], default="product",
-                   help="How to pair models × discovered concepts (default: product).")
-    p.add_argument("--dim", default="gpu",
-                   help="Mesh dimension name (use 'gpu' if your env shows that).")
-    p.add_argument("--max_gpus", type=int, default=0,
-                   help="Limit number of GPUs to use on this host (0 = all visible).")
-    p.add_argument(
-        "--model_parallel_size",
-        choices=("1", "auto"),
-        default="1",
-        help=(
-            "Model GPUs per logical actor. The default '1' preserves the existing "
-            "one-GPU actor path; 'auto' enables experimental dynamic model parallelism."
-        ),
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models", nargs="+", required=True)
+    parser.add_argument("--in_dir", default="prompts")
+    parser.add_argument("--save_dir", default="steering_vectors")
+    parser.add_argument("--layers", nargs="+", default=[None])
+    parser.add_argument("--layer_path", default=None)
+    parser.add_argument(
+        "--pairing", choices=("product", "zip", "zip_cycle"), default="product"
     )
-
-    # Tokenization / compute knobs
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument(
-        "--dtype",
-        choices=("bfloat16", "float16", "float32"),
-        default=SteeringConfig.dtype,
-    )
-    p.add_argument("--batch_size", type=int, default=SteeringConfig.batch_size)
-    p.add_argument("--max_length", type=int, default=SteeringConfig.max_length)
-    p.add_argument("--block_per_pass", type=int, default=SteeringConfig.block_per_pass)
-    p.add_argument("--progress_every", type=int, default=SteeringConfig.progress_every)
-    p.add_argument("--n_positive", type=int, default=None)
-    p.add_argument("--n_negative", type=int, default=None)
-    p.add_argument(
-        "--contrastive",
-        action="store_true",
-        help="Read <concept>_negative.jsonl contrastive prompt files.",
-    )
-    p.add_argument(
-        "--gpu_utilization",
-        type=float,
-        default=0.90,
-        help="Experimental auto-planner fraction of currently free VRAM to use.",
-    )
-    p.add_argument(
-        "--inference_headroom",
-        type=float,
-        default=1.20,
-        help="Experimental auto-planner multiplier over estimated model weight memory.",
-    )
-    p.add_argument("--local_files_only", action="store_true")
-    p.add_argument("--trust_remote_code", action="store_true")
-    p.add_argument(
-        "--plan_only",
-        action="store_true",
-        help="With --model_parallel_size auto, print the topology without loading weights.",
-    )
-    return p.parse_args()
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=SteeringConfig.batch_size)
+    parser.add_argument("--max_length", type=int, default=SteeringConfig.max_length)
+    parser.add_argument("--block_per_pass", type=int, default=SteeringConfig.block_per_pass)
+    parser.add_argument("--progress_every", type=int, default=SteeringConfig.progress_every)
+    parser.add_argument("--n_positive", type=int, default=None)
+    parser.add_argument("--n_negative", type=int, default=None)
+    parser.add_argument("--contrastive", action="store_true")
+    add_distributed_args(parser, default_dtype=SteeringConfig.dtype)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
     try:
-        asyncio.run(main_async(args))
+        asyncio.run(main_async(parse_args()))
     finally:
         shutdown_context().get()

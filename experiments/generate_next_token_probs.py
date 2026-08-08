@@ -1,103 +1,68 @@
 import argparse
 import asyncio
 from pathlib import Path
-from dataclasses import asdict
 
-import torch
-from monarch.actor import shutdown_context, this_host
+from monarch.actor import shutdown_context
 
-from actors.next_token_probs_actor import TokenActor, TokenPlotConfig
+from actors.next_token_probs_actor import TokenPlotConfig
 from actors.utils import discover_jobs
-from experiments.launcher_utils import run_ranked_jobs
+from experiments.distributed_runtime import add_distributed_args
+from experiments.unified_runs import run_next_token_probs
 
 
 async def main_async(args):
-    # Keep CLI simple: we only override seed here and rely on TokenPlotConfig defaults.
-    cfg = TokenPlotConfig(seed=args.seed)
-
+    config = TokenPlotConfig(
+        dtype=args.dtype,
+        seed=args.seed,
+        batch_size=args.batch_size,
+        alpha_start=args.alpha_start,
+        alpha_end=args.alpha_end,
+        alpha_steps=args.alpha_steps,
+        max_length=args.max_length,
+        apply_last_token_only=args.apply_last_token_only,
+        normalize=args.normalize,
+        top_k=args.top_k,
+        progress_every=args.progress_every,
+    )
     steer_dir = Path(args.steer_dir)
     out_dir = Path(args.out_dir)
     contexts_file = Path(args.contexts_file)
-
     if not steer_dir.exists():
-        raise RuntimeError(f"--steer_dir '{steer_dir}' does not exist")
+        raise RuntimeError(f"--steer_dir {str(steer_dir)!r} does not exist")
     if not contexts_file.exists():
-        raise RuntimeError(f"--contexts_file '{contexts_file}' does not exist")
-
-    models = list(args.models)
-    jobs = discover_jobs(steer_dir, models)
+        raise RuntimeError(f"--contexts_file {str(contexts_file)!r} does not exist")
+    jobs = discover_jobs(steer_dir, list(args.models))
     if not jobs:
-        raise RuntimeError(f"No (model, concept) pairs discovered under {steer_dir} for given models.")
-
-    visible = torch.cuda.device_count()
-    if visible < 1:
-        raise RuntimeError("No CUDA devices visible.")
-    use_gpus = min(visible, len(jobs))
-    if args.max_gpus and args.max_gpus > 0:
-        use_gpus = min(use_gpus, args.max_gpus)
-
-    mesh = this_host().spawn_procs(per_host={args.dim: use_gpus})
-    print(mesh.to_table(), flush=True)
-
-    workers = mesh.spawn("plot", TokenActor)
-
-    def actor_for(rank: int):
-        return workers.slice(**{args.dim: rank})
-
-    async def run_one(rank: int, model_name: str, concept_slug: str, concept_label: str):
-        return await actor_for(rank).compute_plot_curves.call_one(
-            model_name=model_name,
-            concept_slug=concept_slug,
-            concept_label=concept_label,
-            # [None] means "all available transformer blocks".
-            block_idx_to_steer=([None] if args.layers == [None] else [int(i) for i in args.layers]),
-            contexts_file=str(contexts_file),
-            steer_dir=str(steer_dir),
-            save_dir=str(out_dir),
-            layer_path=args.layer_path,
-            cfg_dict=asdict(cfg),
-            rank_hint=rank,
-        )
-
-    # As-completed scheduling keeps all GPUs busy during variable-length jobs.
-    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
-        if isinstance(res, Exception):
-            print(f"[gpu {rank}] EXCEPTION: {res}", flush=True)
-            raise res
-        if isinstance(res, dict) and "ok" in res:
-            print(f"[gpu {rank}] finished", flush=True)
-        else:
-            print(f"[gpu {rank}] unexpected result: {res}", flush=True)
+        raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
+    await run_next_token_probs(
+        args, config, jobs, steer_dir, out_dir, contexts_file
+    )
 
 
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--models", nargs="+", required=True,
-                   help="HF model ids or local paths for which steer vectors exist.")
-    p.add_argument("--steer_dir", default="steering_vectors",
-                   help="Root directory containing steering vectors (model_slug/concept_slug/layer_*.pt).")
-    p.add_argument("--contexts_file", default="data/contexts.jsonl",
-                   help="Text file with one input context per line.")
-    p.add_argument("--out_dir", default="plot_data",
-                   help="Where to write .npz curve files.")
-    p.add_argument("--layers", nargs="+", default=[None],
-                   help="Layer indices (e.g., 5 10 15) or all if kept to None. You cannot pass text, only [None] or spaced indexis")
-    p.add_argument("--layer_path", default=None,
-                   help="Override path to block list (e.g., 'model.layers').")
-
-    # α grid / top-k / tokenization
-    # scheduling
-    p.add_argument("--dim", default="gpu", help="Mesh dimension name (use 'gpu' if your env shows that).")
-    p.add_argument("--max_gpus", type=int, default=0, help="Limit number of GPUs (0 = all visible).")
-
-    # misc
-    p.add_argument("--seed", type=int, default=0)
-    return p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models", nargs="+", required=True)
+    parser.add_argument("--steer_dir", default="steering_vectors")
+    parser.add_argument("--contexts_file", default="data/contexts.jsonl")
+    parser.add_argument("--out_dir", default="plot_data")
+    parser.add_argument("--layers", nargs="+", default=[None])
+    parser.add_argument("--layer_path", default=None)
+    parser.add_argument("--batch_size", type=int, default=TokenPlotConfig.batch_size)
+    parser.add_argument("--alpha_start", type=float, default=TokenPlotConfig.alpha_start)
+    parser.add_argument("--alpha_end", type=float, default=TokenPlotConfig.alpha_end)
+    parser.add_argument("--alpha_steps", type=int, default=TokenPlotConfig.alpha_steps)
+    parser.add_argument("--max_length", type=int, default=TokenPlotConfig.max_length)
+    parser.add_argument("--top_k", type=int, default=TokenPlotConfig.top_k)
+    parser.add_argument("--progress_every", type=int, default=TokenPlotConfig.progress_every)
+    parser.add_argument("--apply_last_token_only", action="store_true")
+    parser.add_argument("--normalize", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
+    add_distributed_args(parser, default_dtype=TokenPlotConfig.dtype)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
     try:
-        asyncio.run(main_async(args))
+        asyncio.run(main_async(parse_args()))
     finally:
         shutdown_context().get()

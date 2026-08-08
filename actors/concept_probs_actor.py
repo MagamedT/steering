@@ -12,15 +12,12 @@ from monarch.actor import Actor, endpoint
 from .utils import (
     chunked_with_bounds,
     count_negative_prompts,
-    ensure_pad_token,
     find_block_list,
     load_contexts_for_concept,
-    load_model_and_tokenizer,
     load_steer_vector,
     maybe_apply_chat_template,
     model_slug,
     one_token_ids,
-    set_left_padding,
 )
 
 
@@ -90,50 +87,15 @@ class BehaviorActor(Actor):
     and computes p(concept present) curves vs alpha.
     """
 
-    def __init__(self):
-        torch.backends.cuda.matmul.allow_tf32 = True
-
-        # generator cache
-        self._gen_name: Optional[str] = None
-        self._gen_dtype: Optional[str] = None
-        self._gen_tok = None
-        self._gen_model = None
-
-        # judge cache
-        self._judge_name: Optional[str] = None
-        self._judge_dtype: Optional[str] = None
-        self._judge_tok = None
-        self._judge_model = None
-
-        # cached judge candidate token ids for "1" and "0"
-        self._judge_token_ids_10: Optional[Tuple[List[int], List[int]]] = None
-
-    # --------- model management ---------
-
     def _ensure_generator(self, model_name: str, dtype_str: str):
-        if self._gen_model is not None and self._gen_name == model_name and self._gen_dtype == dtype_str:
+        if self._gen_name == model_name and self._gen_dtype == dtype_str:
             return
-        self._gen_tok = None
-        self._gen_model = None
-        torch.cuda.empty_cache()
-        self._gen_tok, self._gen_model = load_model_and_tokenizer(model_name, dtype_str)
-        set_left_padding(self._gen_tok)
-        ensure_pad_token(self._gen_tok, self._gen_model)
-        self._gen_name = model_name
-        self._gen_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different generator")
 
     def _ensure_judge(self, model_name: str, dtype_str: str):
-        if self._judge_model is not None and self._judge_name == model_name and self._judge_dtype == dtype_str:
+        if self._judge_name == model_name and self._judge_dtype == dtype_str:
             return
-        self._judge_tok = None
-        self._judge_model = None
-        self._judge_token_ids_10 = None
-        torch.cuda.empty_cache()
-        self._judge_tok, self._judge_model = load_model_and_tokenizer(model_name, dtype_str)
-        set_left_padding(self._judge_tok)
-        ensure_pad_token(self._judge_tok, self._judge_model)
-        self._judge_name = model_name
-        self._judge_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different judge")
 
     # --------- judge scoring ---------
 
@@ -194,7 +156,7 @@ class BehaviorActor(Actor):
             truncation=True,
             max_length=cfg.judge_max_prompt_length,
         )
-        input_ids = enc["input_ids"].to("cuda", non_blocking=True)
+        input_ids = enc["input_ids"].to(self.device, non_blocking=True)
         attention_mask = enc.get("attention_mask")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=input_ids.device)
@@ -218,7 +180,11 @@ class BehaviorActor(Actor):
         if tok.eos_token_id is not None:
             gen_kwargs["eos_token_id"] = int(tok.eos_token_id)
     
-        amp_judge = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        amp_judge = torch.autocast(
+            device_type=self.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.device.type == "cuda" and cfg.judge_dtype == "bfloat16",
+        )
         with torch.inference_mode(), amp_judge:
             out_ids = model.generate(
                 input_ids=input_ids,
@@ -255,7 +221,7 @@ class BehaviorActor(Actor):
             truncation=True,
             max_length=cfg.max_prompt_length,
         )
-        input_ids = enc["input_ids"].to("cuda", non_blocking=True)
+        input_ids = enc["input_ids"].to(self.device, non_blocking=True)
         attention_mask = enc.get("attention_mask")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=input_ids.device)
@@ -381,7 +347,8 @@ class BehaviorActor(Actor):
             # Interpret integer input as "sample this many layers uniformly across depth".
             layer_indices = np.linspace(0, n_blocks - 1, num=int(block_idx_to_steer), dtype=int).tolist()
         if not layer_indices:
-            return {"error": "No valid layer indices."}
+            result = {"error": "No valid layer indices."}
+            return result if self.is_leader else None
 
         # contexts for this concept
         try:
@@ -391,10 +358,12 @@ class BehaviorActor(Actor):
                 concept_label=concept_label,
             )
         except Exception as e:
-            return {"error": f"Failed to load contexts for concept '{concept_slug}': {e}"}
+            result = {"error": f"Failed to load contexts for concept '{concept_slug}': {e}"}
+            return result if self.is_leader else None
 
         if not contexts:
-            return {"error": f"No contexts in {contexts_file} for concept '{concept_slug}'"}
+            result = {"error": f"No contexts in {contexts_file} for concept '{concept_slug}'"}
+            return result if self.is_leader else None
 
         n_neg = count_negative_prompts(contexts_file)
         if n_neg is None:
@@ -413,7 +382,8 @@ class BehaviorActor(Actor):
 
         # save root
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
-        save_root.mkdir(parents=True, exist_ok=True)
+        if self.is_leader:
+            save_root.mkdir(parents=True, exist_ok=True)
 
         steer_dir_path = Path(steer_dir)
         results: List[Dict[str, Any]] = []
@@ -424,7 +394,7 @@ class BehaviorActor(Actor):
             steer_vec_cpu = load_steer_vector(steer_dir_path, model_name, concept_slug, int(layer_idx))
             if cfg.normalize:
                 steer_vec_cpu = steer_vec_cpu / torch.norm(steer_vec_cpu).clamp_min(1e-8)
-            steer_vec = steer_vec_cpu.to("cuda", non_blocking=True).to(torch.float32)
+            steer_vec = steer_vec_cpu.to(self.device, non_blocking=True).to(torch.float32)
 
             # storage: p1_by_ctx[C,A]
             C = len(contexts)
@@ -471,6 +441,10 @@ class BehaviorActor(Actor):
 
                 if cfg.progress_every and (ai % max(1, int(cfg.progress_every)) == 0):
                     await asyncio.sleep(0)
+            if not self.is_leader:
+                await asyncio.sleep(0)
+                continue
+
 
             # summaries
             mean_all = np.nanmean(p1_by_ctx, axis=0).astype(np.float32)
@@ -514,6 +488,7 @@ class BehaviorActor(Actor):
                     "max_prompt_length": int(cfg.judge_max_prompt_length),
                 },
                 "contexts_file": str(contexts_file),
+                "tensor_parallel_size": getattr(self, "gpus_per_actor", 1),
             }
 
             np.savez_compressed(
@@ -536,4 +511,8 @@ class BehaviorActor(Actor):
             await asyncio.sleep(0)
 
         torch.cuda.empty_cache()
+        if not self.is_leader:
+            torch.cuda.empty_cache()
+            return None
+
         return {"ok": True, "results": results}

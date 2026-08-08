@@ -10,10 +10,10 @@ from monarch.actor import Actor, endpoint
 
 from .utils import (
     read_jsonl_texts,
-    load_model_and_tokenizer,
     model_slug,
     chunked,
 )
+from .next_token_probs_actor import ensure_full_vocab_logits
 
 @dataclass
 class LogOddsConfig:
@@ -27,22 +27,10 @@ class LogOddsConfig:
 class LogOddsActor(Actor):
     """Computes token-level log-odds (no steering) and saves top-k."""
 
-    def __init__(self):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        self.current_model_name: Optional[str] = None
-        self.current_dtype: Optional[str] = None
-        self.tokenizer = None
-        self.model = None
-
     def _ensure_model(self, model_name: str, dtype_str: str):
-        if self.model is not None and self.current_model_name == model_name and self.current_dtype == dtype_str:
+        if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
-        self.tokenizer = None
-        self.model = None
-        torch.cuda.empty_cache()
-        self.tokenizer, self.model = load_model_and_tokenizer(model_name, dtype_str)
-        self.current_model_name = model_name
-        self.current_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different model")
 
     @endpoint
     async def compute_log_odds(
@@ -76,11 +64,13 @@ class LogOddsActor(Actor):
         if not negative_prompts:
             missing.append(str(neg_path))
         if missing:
-            return {"error": f"Missing or empty prompt files for '{concept_slug}': {', '.join(missing)}"}
+            result = {"error": f"Missing or empty prompt files for '{concept_slug}': {', '.join(missing)}"}
+            return result if self.is_leader else None
 
-        device = next(model.parameters()).device
+        device = getattr(self, "device", next(model.parameters()).device)
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
-        save_root.mkdir(parents=True, exist_ok=True)
+        if self.is_leader:
+            save_root.mkdir(parents=True, exist_ok=True)
         progress_mod = max(1, int(cfg.progress_every))
 
         async def accumulate_log_probs(texts: List[str]) -> Tuple[torch.Tensor, int]:
@@ -99,7 +89,11 @@ class LogOddsActor(Actor):
                 last_idx = torch.clamp(attn_mask.sum(dim=1) - 1, min=0)
 
                 with torch.no_grad():
-                    logits = model(input_ids=input_ids, attention_mask=attn_mask).logits  # [B,T,V]
+                    logits = ensure_full_vocab_logits(
+                        model(input_ids=input_ids, attention_mask=attn_mask).logits,
+                        int(model.config.vocab_size),
+                        getattr(self, "tp_mesh", None),
+                    )
                 row = torch.arange(logits.shape[0], device=logits.device)
                 last_logits = logits[row, last_idx, :].to(torch.float32)
                 log_probs = torch.log_softmax(last_logits, dim=-1).to(torch.float64)
@@ -116,10 +110,15 @@ class LogOddsActor(Actor):
         concept_sum, concept_count = await accumulate_log_probs(concept_prompts)
         nonconcept_sum, nonconcept_count = await accumulate_log_probs(negative_prompts)
         if concept_count == 0 or nonconcept_count == 0:
-            return {"error": "Empty prompts after tokenization"}
+            result = {"error": "Empty prompts after tokenization"}
+            return result if self.is_leader else None
 
         log_odds = (concept_sum / concept_count) - (nonconcept_sum / nonconcept_count)
         vocab_size = log_odds.numel()
+        if not self.is_leader:
+            torch.cuda.empty_cache()
+            return None
+
         if int(cfg.top_k) == -1:
             k = vocab_size
         else:
@@ -143,6 +142,7 @@ class LogOddsActor(Actor):
             "batch_size": int(cfg.batch_size),
             "dtype": cfg.dtype,
             "baseline_alpha": 0.0,
+            "tensor_parallel_size": getattr(self, "gpus_per_actor", 1),
         }
         np.savez_compressed(
             out_path,

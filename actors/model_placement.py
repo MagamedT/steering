@@ -219,5 +219,54 @@ def plan_actor_mesh(
     )
 
 
+def combine_model_estimates(estimates: Sequence[ModelEstimate]) -> ModelEstimate:
+    """Combine models that will coexist on one logical actor."""
+    if not estimates:
+        raise ValueError("At least one model estimate is required")
+    common_divisors = set(estimates[0].tensor_parallel_divisors)
+    for estimate in estimates[1:]:
+        common_divisors.intersection_update(estimate.tensor_parallel_divisors)
+    return ModelEstimate(
+        model_name=" + ".join(estimate.model_name for estimate in estimates),
+        dtype=" + ".join(estimate.dtype for estimate in estimates),
+        weight_bytes=sum(estimate.weight_bytes for estimate in estimates),
+        largest_layer_bytes=max(
+            estimate.largest_layer_bytes for estimate in estimates
+        ),
+        supports_tensor_parallel=all(
+            estimate.supports_tensor_parallel for estimate in estimates
+        ),
+        tensor_parallel_divisors=tuple(sorted(common_divisors)),
+    )
+
+
+def plan_single_gpu_actors(
+    model_name: str,
+    dtype: str,
+    gpu_memory: Sequence[GpuMemory],
+    *,
+    desired_actors: int,
+) -> ActorPlan:
+    """Pack explicit one-GPU logical actors without estimating model weights."""
+    if not gpu_memory:
+        raise RuntimeError("No CUDA devices are available to the actor planner.")
+    if desired_actors < 1:
+        raise ValueError("desired_actors must be at least 1")
+    logical_actors = min(desired_actors, len(gpu_memory))
+    return ActorPlan(
+        model_name=model_name,
+        dtype=dtype,
+        weight_bytes=0,
+        required_bytes=0,
+        largest_layer_bytes=0,
+        gpu_budget_bytes=min(memory.free_bytes for memory in gpu_memory),
+        gpus_per_actor=1,
+        logical_actors=logical_actors,
+        total_gpus=logical_actors,
+        visible_gpus=len(gpu_memory),
+        tensor_parallel=False,
+    )
+
+
 def format_bytes(value: int) -> str:
     return f"{value / (1024**3):.2f} GiB"

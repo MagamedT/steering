@@ -108,6 +108,24 @@ python experiments/generate_prompts.py \
   --out_dir prompts
 ```
 
+Every GPU experiment uses one logical-actor runtime. The default
+`--model_parallel_size auto` chooses the smallest compatible group, including
+a one-rank actor when the model fits on one GPU. Use `1` only to force
+one-rank placement:
+
+```bash
+python experiments/generate_prompts.py \
+  --model_generating_concept Qwen/Qwen2.5-72B \
+  --concepts joy \
+  --out_dir prompts \
+  --contrastive --model_parallel_size auto --dtype bfloat16
+```
+
+Contrastive positive and negative generation are independent scheduler jobs.
+Plot contexts and explicitly requested layers are split the same way. If the
+planner selects two GPUs per Qwen2.5-72B replica, four GPUs can therefore run
+two model replicas concurrently whenever at least two such jobs are available.
+
 ### 2) Compute steering vectors
 
 This command computes per-layer steering vectors from prompt activations.
@@ -119,8 +137,8 @@ python experiments/generate_steering_vectors.py \
   --save_dir steering_vectors
 ```
 
-The default remains one model replica per GPU actor. For models that do not
-fit on one GPU, opt into the experimental automatic model-parallel planner:
+The same command handles one- and multi-GPU replicas. Automatic placement also
+packs multiple replicas when enough GPUs and independent jobs are available:
 
 ```bash
 python experiments/generate_steering_vectors.py \
@@ -130,8 +148,8 @@ python experiments/generate_steering_vectors.py \
   --model_parallel_size auto
 ```
 
-See [experimental dynamic model parallelism](docs/experimental/dynamic_model_parallelism.md)
-for planning controls, topology, and current constraints.
+See [unified model parallelism](docs/model_parallelism.md) for supported
+experiments, planning controls, topology, and current constraints.
 
 ### 3) Probability curves vs alpha
 
@@ -143,6 +161,19 @@ python experiments/generate_next_token_probs.py \
   --steer_dir steering_vectors \
   --contexts_file data/contexts.jsonl \
   --out_dir plot_data
+```
+
+The plot launcher supports the same automatic model placement, plus CLI
+controls for bounded alpha sweeps:
+
+```bash
+python experiments/generate_next_token_probs.py \
+  --models Qwen/Qwen2.5-72B \
+  --steer_dir steering_vectors \
+  --contexts_file data/contexts.jsonl \
+  --out_dir plot_data \
+  --model_parallel_size auto --dtype bfloat16 \
+  --alpha_steps 41 --batch_size 8 --layers 39
 ```
 
 ## Optional Evaluations
@@ -159,6 +190,10 @@ python experiments/generate_concept_probs.py \
   --contexts_file data/contexts.jsonl \
   --out_dir behavior_data
 ```
+
+With `--model_parallel_size auto`, the generator and judge are planned
+together and sharded across the same logical-actor GPU group. The continuous
+concept-probability launcher uses the same runtime.
 
 ### Cross-entropy
 
@@ -226,7 +261,11 @@ Most outputs are grouped by model slug and concept slug:
 
 ## Notes
 
-- To change experiment settings (for example batch size, steering-vector normalization, or contrastive prompts), edit the `@dataclass` config blocks in the corresponding files under `actors/` (for example `actors/steering_vector_actor.py`, `actors/next_token_probs_actor.py`, `actors/concept_probs_actor.py`, `actors/cross_entropy_actor.py`, `actors/log_odds_actor.py`).
+- All GPU launchers accept `--model_parallel_size {1,auto}`, `--dtype`,
+  `--max_gpus`, `--gpu_utilization`, `--inference_headroom`, and
+  `--plan_only`.
+- Experiment defaults live in the corresponding config dataclasses under
+  `actors/`.
 
 
 ## Citation

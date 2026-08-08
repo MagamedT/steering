@@ -6,9 +6,34 @@ import asyncio
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 from monarch.actor import Actor, endpoint
 
-from .utils import find_block_list, model_slug, load_model_and_tokenizer, load_steer_vector, load_contexts_for_concept
+from .utils import find_block_list, model_slug, load_steer_vector, load_contexts_for_concept
+
+
+def ensure_full_vocab_logits(logits, expected_vocab_size: int, tp_mesh=None):
+    """Materialize full-vocabulary logits when a model shards its LM head."""
+    if isinstance(logits, DTensor):
+        logits = logits.full_tensor()
+    if logits.shape[-1] == expected_vocab_size:
+        return logits
+    if tp_mesh is None:
+        raise RuntimeError(
+            f"Expected vocabulary width {expected_vocab_size}, got {logits.shape[-1]}"
+        )
+    tp_size = int(tp_mesh.size())
+    if logits.shape[-1] * tp_size != expected_vocab_size:
+        raise RuntimeError(
+            "Cannot reconstruct full-vocabulary logits: "
+            f"local width={logits.shape[-1]}, TP size={tp_size}, "
+            f"expected width={expected_vocab_size}"
+        )
+    local_logits = logits.contiguous()
+    gathered = [torch.empty_like(local_logits) for _ in range(tp_size)]
+    dist.all_gather(gathered, local_logits, group=tp_mesh.get_group())
+    return torch.cat(gathered, dim=-1)
 
 
 # -----------------------------
@@ -35,26 +60,12 @@ class TokenPlotConfig:
 # -----------------------------
 
 class TokenActor(Actor):
-    """
-    One actor per GPU. Caches last loaded (model, dtype).
-    Exposes endpoint to compute batched-alpha probability curves for many layers/contexts.
-    """
-    def __init__(self):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        self.current_model_name = None
-        self.current_dtype = None
-        self.tokenizer = None
-        self.model = None
+    """Next-token probability endpoints used by the distributed actor."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
-        if self.model is not None and self.current_model_name == model_name and self.current_dtype == dtype_str:
+        if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
-        self.tokenizer = None
-        self.model = None
-        torch.cuda.empty_cache()
-        self.tokenizer, self.model = load_model_and_tokenizer(model_name, dtype_str)
-        self.current_model_name = model_name
-        self.current_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different model")
 
     @endpoint
     async def compute_plot_curves(
@@ -69,6 +80,7 @@ class TokenActor(Actor):
         layer_path=None,  # optional str for block list path
         cfg_dict=None,    # dict (PlotConfig)
         rank_hint=0,      # int
+        context_indices=None,  # optional list[int] for replica-level sharding
     ):
         cfg = TokenPlotConfig(**(cfg_dict or {}))
         torch.manual_seed(cfg.seed + int(rank_hint))
@@ -94,7 +106,21 @@ class TokenActor(Actor):
             concept_label=concept_label,
         )
         if not contexts:
-            return {"error": f"No contexts in {contexts_file} for concept '{concept_slug}'"}
+            if self.is_leader:
+                return {"error": f"No contexts in {contexts_file} for concept '{concept_slug}'"}
+            return None
+
+        if context_indices is None:
+            selected_context_indices = list(range(len(contexts)))
+        else:
+            selected_context_indices = [int(index) for index in context_indices]
+            invalid = [
+                index
+                for index in selected_context_indices
+                if index < 0 or index >= len(contexts)
+            ]
+            if invalid:
+                raise IndexError(f"Context indices out of range: {invalid}")
 
 
         # Prepare α grid (ensure 0 present)
@@ -105,7 +131,8 @@ class TokenActor(Actor):
         batch_size = alpha_amount if cfg.batch_size == 0 else cfg.batch_size
         # Save root
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
-        save_root.mkdir(parents=True, exist_ok=True)
+        if self.is_leader:
+            save_root.mkdir(parents=True, exist_ok=True)
 
         # Main loops: layers × contexts
         steer_dir_path = Path(steer_dir)
@@ -116,7 +143,8 @@ class TokenActor(Actor):
             steer_vec_cpu = load_steer_vector(steer_dir_path, model_name, concept_slug, block_idx)  # [H], float32 on CPU
             if cfg.normalize:
                 steer_vec_cpu = steer_vec_cpu / torch.norm(steer_vec_cpu).clamp_min(1e-8)
-            for ctx_idx, context in enumerate(contexts):
+            for work_idx, ctx_idx in enumerate(selected_context_indices):
+                context = contexts[ctx_idx]
                 # Tokenize once
                 ctx_source_line = context_source_lines[ctx_idx]
                 enc = tokenizer(context, return_tensors="pt", truncation=True, max_length=cfg.max_length)
@@ -125,8 +153,8 @@ class TokenActor(Actor):
                 token_amount = int(input_ids.shape[1])
 
                 # Repeat for all α
-                input_ids = input_ids.repeat(batch_size, 1).to("cuda", non_blocking=True)             # [alpha_amount, token_amount]
-                attn_mask = attn_mask.repeat(batch_size, 1).to("cuda", non_blocking=True)            # [alpha_amount, token_amount]
+                input_ids = input_ids.repeat(batch_size, 1).to(self.device, non_blocking=True)             # [alpha_amount, token_amount]
+                attn_mask = attn_mask.repeat(batch_size, 1).to(self.device, non_blocking=True)            # [alpha_amount, token_amount]
 
                 # Precompute last-token mask (if requested)
                 if cfg.apply_last_token_only:
@@ -143,8 +171,7 @@ class TokenActor(Actor):
                         add = alpha[:, None, None] * steer_vec[None, None, :]
                         if mask is not None:
                             add = add * mask
-                        x_steered = x + add
-                        # optionally cast back to bf16 for the rest of the network:
+                        x_steered = (x + add).to(x.dtype)
                         if isinstance(output, (tuple, list)):
                             out = list(output)
                             out[0] = x_steered
@@ -170,11 +197,21 @@ class TokenActor(Actor):
                     # Forward once for all α
                     with torch.inference_mode():
                         out = model(input_ids=input_ids, attention_mask=attn_mask)
-                        logits = out.logits  # [A, T, V]
+                        logits = ensure_full_vocab_logits(
+                            out.logits,
+                            int(model.config.vocab_size),
+                            self.tp_mesh,
+                        )  # [A, T, V]
                         query_token_logits = logits[:, -1, :].to(torch.float32)  # [A, V]
-                        probs_list.append(torch.softmax(query_token_logits, dim=-1).cpu())  # fp32 softmax
+                        if self.is_leader:
+                            probs_list.append(torch.softmax(query_token_logits, dim=-1).cpu())  # fp32 softmax
 
                     handle.remove()
+
+                if not self.is_leader:
+                    if (work_idx % progress_mod) == 0:
+                        await asyncio.sleep(0)
+                    continue
 
                 # stack the probs_list along alpha dim
                 probs = torch.cat(probs_list, dim = 0)
@@ -210,6 +247,7 @@ class TokenActor(Actor):
                     "apply_last_token_only": bool(cfg.apply_last_token_only),
                     "alphas": {"start": float(alphas[0].item()), "end": float(alphas[-1].item()), "steps": int(alpha_amount)},
                     "baseline_alpha": 0,
+                    "tensor_parallel_size": int(getattr(self, "gpus_per_actor", 1)),
                 }
                 np.savez_compressed(
                     out_path,
@@ -223,9 +261,15 @@ class TokenActor(Actor):
                     meta=json.dumps(meta),
                 )
 
-                if (ctx_idx % progress_mod) == 0:
+                if (work_idx % progress_mod) == 0:
                     # Let the actor service its mailbox during long loops
                     await asyncio.sleep(0)
 
         torch.cuda.empty_cache()
-        return {"ok": True}
+        if not self.is_leader:
+            return None
+        return {
+            "ok": True,
+            "context_indices": selected_context_indices,
+            "layers": [int(index) for index in block_idx_to_steer],
+        }

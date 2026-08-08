@@ -14,7 +14,6 @@ from monarch.actor import Actor, endpoint
 from .utils import (
     extract_choice_from_continuation,
     find_block_list,
-    load_model_and_tokenizer,
     load_steer_vector,
     model_slug,
     patch_tqdm_disable,
@@ -55,24 +54,12 @@ class MMLUEvalConfig:
 
 
 class MMLUActor(Actor):
-    """One actor per GPU. Computes MMLU scores over a grid of alpha for specified layers."""
-
-    def __init__(self):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        self.current_model_name: Optional[str] = None
-        self.current_dtype: Optional[str] = None
-        self.tokenizer = None
-        self.model = None
+    """MMLU endpoints used by the distributed actor."""
 
     def _ensure_model(self, model_name: str, dtype_str: str):
-        if self.model is not None and self.current_model_name == model_name and self.current_dtype == dtype_str:
+        if self.current_model_name == model_name and self.current_dtype == dtype_str:
             return
-        self.tokenizer = None
-        self.model = None
-        torch.cuda.empty_cache()
-        self.tokenizer, self.model = load_model_and_tokenizer(model_name, dtype_str)
-        self.current_model_name = model_name
-        self.current_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different model")
 
     @endpoint
     async def compute_mmlu(
@@ -104,12 +91,13 @@ class MMLUActor(Actor):
             except Exception:
                 from deepeval.models.base_model import DeepEvalBaseLLM
         except Exception as e:
-            return {"ok": False, "error": f"Failed to import deepeval: {e}"}
+            result = {"ok": False, "error": f"Failed to import deepeval: {e}"}
+            return result if self.is_leader else None
 
         self._ensure_model(model_name, cfg.dtype)
         tokenizer, model = self.tokenizer, self.model
         model.eval()
-        device = next(model.parameters()).device
+        device = getattr(self, "device", next(model.parameters()).device)
 
         blocks = find_block_list(model, override_path=layer_path)
         n_blocks = len(blocks)
@@ -132,7 +120,8 @@ class MMLUActor(Actor):
         task_ids = [str(getattr(t, "value", t.name)).strip() for t in tasks]
 
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
-        save_root.mkdir(parents=True, exist_ok=True)
+        if self.is_leader:
+            save_root.mkdir(parents=True, exist_ok=True)
 
         steer_dir_path = Path(steer_dir)
         saved_paths: list[str] = []
@@ -299,7 +288,7 @@ class MMLUActor(Actor):
 
                     overall: Optional[float] = None
 
-                    # 1) Legacy style: attribute on benchmark
+                    # 1) Older deepeval API: attribute on benchmark
                     val = getattr(benchmark, "overall_score", None)
                     if isinstance(val, (int, float)):
                         overall = float(val)
@@ -351,6 +340,9 @@ class MMLUActor(Actor):
                 if eval_counter % progress_mod == 0:
                     await asyncio.sleep(0)
 
+            if not self.is_leader:
+                continue
+
             payload: dict[str, Any] = {
                 "model": model_name,
                 "concept": concept_label,
@@ -369,6 +361,7 @@ class MMLUActor(Actor):
                 "use_chat_template": bool(cfg.use_chat_template),
                 "dtype": cfg.dtype,
                 "errors": errors,
+                "tensor_parallel_size": getattr(self, "gpus_per_actor", 1),
             }
 
             out_path = save_root / f"layer_{block_idx}_mmlu.json"
@@ -376,6 +369,10 @@ class MMLUActor(Actor):
                 json.dump(payload, f, ensure_ascii=True, indent=2)
             saved_paths.append(str(out_path))
             results.append(payload)
+
+        if not self.is_leader:
+            torch.cuda.empty_cache()
+            return None
 
         torch.cuda.empty_cache()
         return {"ok": True, "saved": saved_paths, "results": results}

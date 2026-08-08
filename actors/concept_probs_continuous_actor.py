@@ -16,13 +16,10 @@ from monarch.actor import Actor, endpoint
 from .utils import (
     chunked_with_bounds,
     count_negative_prompts,
-    ensure_pad_token,
     find_block_list,
     load_contexts_for_concept,
-    load_model_and_tokenizer,
     load_steer_vector,
     model_slug,
-    set_left_padding,
 )
 
 from .rubric_judge import (
@@ -83,50 +80,21 @@ class BehaviorConfig:
 class BehaviorActor(Actor):
     """Generate steered completions and judge each one with a score in [0,1]."""
 
-    def __init__(self):
-        torch.backends.cuda.matmul.allow_tf32 = True
-
-        self._gen_name: Optional[str] = None
-        self._gen_dtype: Optional[str] = None
-        self._gen_tok = None
-        self._gen_model = None
-
-        self._judge_name: Optional[str] = None
-        self._judge_dtype: Optional[str] = None
-        self._judge_tok = None
-        self._judge_model = None
-
     def _ensure_generator(self, model_name: str, dtype_str: str):
         if (
-            self._gen_model is not None
-            and self._gen_name == model_name
+            self._gen_name == model_name
             and self._gen_dtype == dtype_str
         ):
             return
-        self._gen_tok = None
-        self._gen_model = None
-        torch.cuda.empty_cache()
-        self._gen_tok, self._gen_model = load_model_and_tokenizer(model_name, dtype_str)
-        set_left_padding(self._gen_tok)
-        ensure_pad_token(self._gen_tok, self._gen_model)
-        self._gen_name = model_name
-        self._gen_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different generator")
 
     def _ensure_judge(self, model_name: str, dtype_str: str):
         if (
-            self._judge_model is not None
-            and self._judge_name == model_name
+            self._judge_name == model_name
             and self._judge_dtype == dtype_str
         ):
             return
-        self._judge_tok = None
-        self._judge_model = None
-        torch.cuda.empty_cache()
-        self._judge_tok, self._judge_model = load_model_and_tokenizer(model_name, dtype_str)
-        set_left_padding(self._judge_tok)
-        ensure_pad_token(self._judge_tok, self._judge_model)
-        self._judge_name = model_name
-        self._judge_dtype = dtype_str
+        raise RuntimeError("Distributed actor was initialized for a different judge")
 
     def _judge_completion_scores(
         self,
@@ -147,6 +115,7 @@ class BehaviorActor(Actor):
             # The source context must not affect the verdict.
             instructions=None,
             return_details=True,
+            tp_mesh=getattr(self, "tp_mesh", None),
         )
         if not isinstance(details, RubricJudgeDetails):
             raise RuntimeError("Rubric judge returned no scoring diagnostics.")
@@ -172,7 +141,7 @@ class BehaviorActor(Actor):
             truncation=True,
             max_length=int(cfg.max_prompt_length),
         )
-        input_ids = enc["input_ids"].to("cuda", non_blocking=True)
+        input_ids = enc["input_ids"].to(self.device, non_blocking=True)
         attention_mask = enc.get("attention_mask")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=input_ids.device)
@@ -297,7 +266,8 @@ class BehaviorActor(Actor):
                 dtype=int,
             ).tolist()
         if not layer_indices:
-            return {"error": "No valid layer indices."}
+            result = {"error": "No valid layer indices."}
+            return result if self.is_leader else None
 
         try:
             contexts, context_source_lines = load_contexts_for_concept(
@@ -306,11 +276,11 @@ class BehaviorActor(Actor):
                 concept_label=concept_label,
             )
         except Exception as exc:
-            return {
-                "error": f"Failed to load contexts for concept '{concept_slug}': {exc}"
-            }
+            result = {"error": f"Failed to load contexts for concept '{concept_slug}': {exc}"}
+            return result if self.is_leader else None
         if not contexts:
-            return {"error": f"No contexts in {contexts_file} for '{concept_slug}'"}
+            result = {"error": f"No contexts in {contexts_file} for '{concept_slug}'"}
+            return result if self.is_leader else None
 
         negative_count = count_negative_prompts(contexts_file)
         if negative_count is None:
@@ -341,7 +311,8 @@ class BehaviorActor(Actor):
         alphas_np = alphas.cpu().numpy().astype(np.float32)
 
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
-        save_root.mkdir(parents=True, exist_ok=True)
+        if self.is_leader:
+            save_root.mkdir(parents=True, exist_ok=True)
         steer_dir_path = Path(steer_dir)
         results: List[Dict[str, Any]] = []
 
@@ -354,7 +325,7 @@ class BehaviorActor(Actor):
             )
             if cfg.normalize:
                 steer_vec_cpu = steer_vec_cpu / torch.norm(steer_vec_cpu).clamp_min(1e-8)
-            steer_vec = steer_vec_cpu.to("cuda", non_blocking=True).to(torch.float32)
+            steer_vec = steer_vec_cpu.to(self.device, non_blocking=True).to(torch.float32)
 
             context_count = len(contexts)
             alpha_count = int(alphas.numel())
@@ -441,6 +412,10 @@ class BehaviorActor(Actor):
                 if cfg.progress_every and alpha_index % int(cfg.progress_every) == 0:
                     await asyncio.sleep(0)
 
+            if not self.is_leader:
+                await asyncio.sleep(0)
+                continue
+
             mean_all = np.nanmean(concept_scores_by_ctx, axis=0).astype(np.float32)
             if (ctx_is_positive >= 0).all():
                 negative = concept_scores_by_ctx[ctx_is_positive == 0]
@@ -492,6 +467,7 @@ class BehaviorActor(Actor):
                     "aggregation": "arithmetic mean over completion scores",
                 },
                 "contexts_file": str(contexts_file),
+                "tensor_parallel_size": getattr(self, "gpus_per_actor", 1),
             }
             np.savez_compressed(
                 out_path,
@@ -511,6 +487,10 @@ class BehaviorActor(Actor):
             )
             results.append({"layer_idx": int(layer_idx), "file": str(out_path)})
             await asyncio.sleep(0)
+
+        if not self.is_leader:
+            torch.cuda.empty_cache()
+            return None
 
         torch.cuda.empty_cache()
         return {"ok": True, "results": results}

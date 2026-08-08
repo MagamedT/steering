@@ -18,8 +18,6 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
     GPT2Config,
     GPT2LMHeadModel,
     PreTrainedTokenizerFast,
@@ -28,12 +26,15 @@ from transformers import (
 from actors import concept_probs_actor
 from actors import concept_probs_continuous_actor
 from actors import rubric_judge
+from actors import rescore_actor
 from actors import cross_entropy_actor
 from actors import log_odds_actor
 from actors import mmlu_actor
 from actors import prompts_actor
 from actors import next_token_probs_actor
-from actors import steering_vector_actor
+from actors import distributed_steering_actor
+from actors.model_placement import GpuMemory
+from experiments import distributed_runtime
 from actors.utils import model_slug
 from experiments import generate_concept_probs
 from experiments import generate_concept_probs_continuous
@@ -44,6 +45,7 @@ from experiments import generate_mmlu
 from experiments import generate_next_token_probs
 from experiments import generate_prompts
 from experiments import generate_steering_vectors
+from experiments import rescore_concept_probs_continuous
 
 
 def make_tiny_model(path: Path) -> None:
@@ -98,9 +100,15 @@ class LocalCall:
         self.actor = actor
         self.name = name
 
-    async def call_one(self, *args, **kwargs):
-        endpoint = type(self.actor).__dict__[self.name]
+    async def _invoke(self, *args, **kwargs):
+        endpoint = getattr(type(self.actor), self.name)
         return await endpoint._method(self.actor, *args, **kwargs)
+
+    async def call_one(self, *args, **kwargs):
+        return await self._invoke(*args, **kwargs)
+
+    async def call(self, *args, **kwargs):
+        return {0: await self._invoke(*args, **kwargs)}
 
 
 class LocalActor:
@@ -119,6 +127,9 @@ class LocalActorGroup:
         return LocalActor(self.actor)
 
 
+    def __getattr__(self, name):
+        return LocalCall(self.actor, name)
+
 class LocalMesh:
     def to_table(self):
         return "cpu worker"
@@ -128,6 +139,9 @@ class LocalMesh:
         actor_class.__init__(actor, *args)
         return LocalActorGroup(actor)
 
+
+    async def stop(self):
+        return None
 
 class LocalHost:
     def spawn_procs(self, **_kwargs):
@@ -139,6 +153,42 @@ def small_config(config_class, **small_values):
         return config_class(**{**small_values, **values})
 
     return build
+
+def runtime_args(**values):
+    defaults = {
+        "model_parallel_size": "1",
+        "dtype": "float32",
+        "gpu_utilization": 0.9,
+        "inference_headroom": 1.2,
+        "local_files_only": True,
+        "trust_remote_code": False,
+        "plan_only": False,
+        "dim": "gpu",
+        "max_gpus": 1,
+        "batch_size": 1,
+        "max_length": 16,
+        "max_new_tokens": 2,
+        "temperature": 1.0,
+        "top_k": 2,
+        "top_p": 1.0,
+        "alpha_start": -1.0,
+        "alpha_end": 1.0,
+        "alpha_steps": 3,
+        "block_per_pass": 0,
+        "progress_every": 1,
+        "n_positive": None,
+        "n_negative": None,
+        "apply_last_token_only": False,
+        "normalize": False,
+        "samples_per_context": 1,
+        "context_batch_size": 1,
+        "judge_batch_size": 1,
+        "judge_max_new_tokens": 2,
+        "layer": None,
+    }
+    defaults.update(values)
+    return SimpleNamespace(**defaults)
+
 
 
 @contextlib.contextmanager
@@ -170,33 +220,6 @@ def cpu_only(model_path: Path):
             return contextlib.nullcontext()
         return original_autocast(device_type, *args, **kwargs)
 
-    def load_tiny(_model_name, _dtype="float32", **_kwargs):
-        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True)
-        model.eval()
-        return tokenizer, model
-
-    actor_modules = (
-        prompts_actor,
-        steering_vector_actor,
-        next_token_probs_actor,
-        concept_probs_actor,
-        concept_probs_continuous_actor,
-        log_odds_actor,
-        cross_entropy_actor,
-        mmlu_actor,
-    )
-    launcher_modules = (
-        generate_prompts,
-        generate_steering_vectors,
-        generate_next_token_probs,
-        generate_concept_probs,
-        generate_concept_probs_continuous,
-        generate_log_odds,
-        generate_cross_entropy,
-        generate_mmlu,
-    )
-
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch.object(torch.Tensor, "to", cpu_to))
         stack.enter_context(patch.object(torch, "tensor", cpu_tensor))
@@ -208,10 +231,25 @@ def cpu_only(model_path: Path):
         stack.enter_context(patch.object(torch.cuda, "empty_cache", return_value=None))
         stack.enter_context(patch.object(torch.cuda, "manual_seed_all", return_value=None))
 
-        for module in actor_modules:
-            stack.enter_context(patch.object(module, "load_model_and_tokenizer", load_tiny))
-        for module in launcher_modules:
-            stack.enter_context(patch.object(module, "this_host", return_value=LocalHost()))
+        stack.enter_context(
+            patch.object(distributed_runtime, "this_host", return_value=LocalHost())
+        )
+        stack.enter_context(
+            patch.object(
+                distributed_runtime,
+                "discover_gpu_memory",
+                return_value=[GpuMemory(0, 16 * 1024**3, 16 * 1024**3)],
+            )
+        )
+
+        async def fake_setup(_mesh):
+            return None
+
+        stack.enter_context(
+            patch.object(
+                distributed_runtime, "setup_torch_elastic_env_async", fake_setup
+            )
+        )
 
         stack.enter_context(
             patch.object(
@@ -224,7 +262,7 @@ def cpu_only(model_path: Path):
             patch.object(
                 generate_steering_vectors,
                 "SteeringConfig",
-                small_config(steering_vector_actor.SteeringConfig, batch_size=1, max_length=16),
+                small_config(distributed_steering_actor.SteeringConfig, batch_size=1, max_length=16),
             )
         )
         stack.enter_context(
@@ -403,7 +441,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
             pq.write_table(pa.table({"text": ["good day joy good"]}), parquet)
 
             with cpu_only(tiny_model):
-                await generate_prompts.main_async(SimpleNamespace(
+                await generate_prompts.main_async(runtime_args(
                     model_generating_concept=model_name, models=[model_name], concepts=["joy"],
                     out_dir=str(prompts), seed=0, dim="gpu", max_gpus=1,
                     contrastive=False, n_related=2, n_unrelated=2, batch_size=1,
@@ -413,7 +451,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(rows), 2)
                     self.assertTrue(all(row["text"].strip() for row in rows))
 
-                await generate_steering_vectors.main_async(SimpleNamespace(
+                await generate_steering_vectors.main_async(runtime_args(
                     models=[model_name], in_dir=str(prompts), save_dir=str(steering),
                     layers=["0"], layer_path=None, pairing="product", dim="gpu",
                     max_gpus=1, seed=0, contrastive=False,
@@ -425,7 +463,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(torch.isfinite(vector).all())
 
                 plot_out = root / "plot"
-                await generate_next_token_probs.main_async(SimpleNamespace(
+                await generate_next_token_probs.main_async(runtime_args(
                     models=[model_name], steer_dir=str(steering), contexts_file=str(contexts),
                     out_dir=str(plot_out), layers=["0"], layer_path=None,
                     dim="gpu", max_gpus=1, seed=0,
@@ -433,7 +471,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(plot_out.rglob("*.npz")))
 
                 behavior_out = root / "behavior"
-                await generate_concept_probs.main_async(SimpleNamespace(
+                await generate_concept_probs.main_async(runtime_args(
                     models=[model_name], judge_model=model_name, steer_dir=str(steering),
                     contexts_file=str(contexts), out_dir=str(behavior_out), layers=1,
                     layer_path=None, dim="gpu", max_gpus=1,
@@ -441,7 +479,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(behavior_out.rglob("*.npz")))
 
                 continuous_out = root / "behavior_continuous"
-                await generate_concept_probs_continuous.main_async(SimpleNamespace(
+                await generate_concept_probs_continuous.main_async(runtime_args(
                     models=[model_name], judge_model=model_name, steer_dir=str(steering),
                     contexts_file=str(contexts), out_dir=str(continuous_out), layers=1,
                     layer_path=None, dim="gpu", max_gpus=1, alpha_start=-1,
@@ -456,15 +494,53 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(np.all((0.0 <= scores) & (scores <= 1.0)))
                     self.assertTrue(np.allclose(scores, 0.5))
 
+                def fake_rescore_details(
+                    _tokenizer,
+                    _model,
+                    samples,
+                    _concept,
+                    _cfg,
+                    **_kwargs,
+                ):
+                    count = len(samples)
+                    values = torch.full((count,), 0.5, dtype=torch.float32)
+                    return rescore_actor.RubricJudgeDetails(
+                        scores=values,
+                        raw_json=tuple(
+                            '{"explanation_1":"test","criteria_met_1":true}'
+                            for _ in samples
+                        ),
+                        criteria_met=(True,) * count,
+                        true_logits=torch.zeros(count),
+                        false_logits=torch.zeros(count),
+                        pair_mass=torch.ones(count),
+                        verdict_token_ids=(0,) * count,
+                        true_token_ids=(0,) * count,
+                        false_token_ids=(1,) * count,
+                        verdict_positions=(0,) * count,
+                    )
+
+                rescore_out = root / "behavior_rescored"
+                with patch.object(
+                    rescore_actor,
+                    "rubric_completion_scores",
+                    fake_rescore_details,
+                ):
+                    await rescore_concept_probs_continuous.main_async(runtime_args(
+                        input_dir=str(continuous_out), output_dir=str(rescore_out),
+                        judge_model=model_name,
+                    ))
+                self.assertTrue(any(rescore_out.rglob("*.npz")))
+
                 log_out = root / "log_odds"
-                await generate_log_odds.main_async(SimpleNamespace(
+                await generate_log_odds.main_async(runtime_args(
                     models=[model_name], prompts_dir=str(prompts), out_dir=str(log_out),
                     concepts=None, dim="gpu", max_gpus=1,
                 ))
                 self.assertTrue(any(log_out.rglob("*.npz")))
 
                 cross_out = root / "cross_entropy"
-                await generate_cross_entropy.main_async(SimpleNamespace(
+                await generate_cross_entropy.main_async(runtime_args(
                     models=[model_name], steer_dir=str(steering), eval_parquet=str(parquet),
                     out_dir=str(cross_out), layers=1, layer_path=None,
                     seed=0, dim="gpu", max_gpus=1,
@@ -473,7 +549,7 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
 
                 mmlu_out = root / "mmlu"
                 with fake_deepeval():
-                    await generate_mmlu.main_async(SimpleNamespace(
+                    await generate_mmlu.main_async(runtime_args(
                         models=[model_name], steer_dir=str(steering), out_dir=str(mmlu_out),
                         tasks=["HIGH_SCHOOL_COMPUTER_SCIENCE"], layers=1,
                         layer_path=None, seed=0, dim="gpu", max_gpus=1,

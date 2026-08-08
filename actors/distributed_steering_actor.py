@@ -2,22 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-import os
 from pathlib import Path
 
 import torch
-import torch.distributed as dist
 from monarch.actor import Actor, endpoint
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from actors.utils import chunked, find_block_list, model_slug, read_jsonl_texts
-from .model_placement import dtype_from_name
+from .distributed import DistributedActorMixin
 
 
 @dataclass
-class TensorParallelSteeringConfig:
-    batch_size: int = 8
+class SteeringConfig:
+    batch_size: int = 50
     max_length: int = 300
+    dtype: str = "float32"
     seed: int = 42
     n_positive: int | None = None
     n_negative: int | None = None
@@ -26,8 +24,10 @@ class TensorParallelSteeringConfig:
     progress_every: int = 5
 
 
-class TensorParallelSteeringActor(Actor):
-    """One physical actor per GPU; a TP slice forms one logical actor."""
+class DistributedSteeringActor(DistributedActorMixin, Actor):
+    """A steering-vector logical actor spanning one or more GPUs."""
+
+    _distributed_model_attrs = ("model", "tokenizer")
 
     def __init__(
         self,
@@ -38,71 +38,15 @@ class TensorParallelSteeringActor(Actor):
         local_files_only: bool = False,
         trust_remote_code: bool = False,
     ) -> None:
-        torch.backends.cuda.matmul.allow_tf32 = True
         self.model_name = model_name
         self.dtype_name = dtype
-        self.logical_actors = int(logical_actors)
-        self.gpus_per_actor = int(gpus_per_actor)
-        self.global_rank = int(os.environ["RANK"])
-        self.local_rank = int(os.environ["LOCAL_RANK"])
-        self.replica_rank = self.global_rank // self.gpus_per_actor
-        self.tensor_parallel_rank = self.global_rank % self.gpus_per_actor
-        self.is_leader = self.tensor_parallel_rank == 0
-
-        torch.cuda.set_device(self.local_rank)
-        self.device = torch.device("cuda", self.local_rank)
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
-        self.device_mesh = torch.distributed.init_device_mesh(
-            "cuda",
-            (self.logical_actors, self.gpus_per_actor),
-            mesh_dim_names=("replica", "tp"),
-        )
-
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        self._configure_topology(logical_actors, gpus_per_actor)
+        self.tokenizer, self.model = self._load_distributed_causal_lm(
             model_name,
-            use_fast=False,
+            dtype,
             local_files_only=local_files_only,
             trust_remote_code=trust_remote_code,
         )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token or self.tokenizer.bos_token
-
-        common = dict(
-            low_cpu_mem_usage=True,
-            dtype=dtype_from_name(dtype),
-            local_files_only=local_files_only,
-            trust_remote_code=trust_remote_code,
-            attn_implementation="sdpa",
-        )
-        if self.gpus_per_actor > 1:
-            common.update(tp_plan="auto", device_mesh=self.device_mesh)
-        else:
-            common.update(device_map={"": self.local_rank})
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **common)
-        self.model.eval()
-        self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
-        if self.tokenizer.eos_token_id is not None:
-            self.model.generation_config.eos_token_id = self.tokenizer.eos_token_id
-
-    @endpoint
-    async def describe(self) -> dict:
-        return {
-            "global_rank": self.global_rank,
-            "local_rank": self.local_rank,
-            "replica_rank": self.replica_rank,
-            "tensor_parallel_rank": self.tensor_parallel_rank,
-            "model": self.model_name,
-            "model_tp_size": getattr(self.model, "tp_size", None),
-        }
-
-    @endpoint
-    async def close(self) -> None:
-        self.model = None
-        self.tokenizer = None
-        torch.cuda.empty_cache()
-        if dist.is_initialized():
-            dist.destroy_process_group()
 
     @endpoint
     async def compute_for(
@@ -116,7 +60,7 @@ class TensorParallelSteeringActor(Actor):
         layer_path: str | None,
         logical_rank: int,
     ) -> dict | None:
-        cfg = TensorParallelSteeringConfig(**cfg_dict)
+        cfg = SteeringConfig(**cfg_dict)
         # TP ranks must see identical inputs; replica ranks get distinct seeds.
         torch.manual_seed(cfg.seed + int(logical_rank))
         torch.cuda.manual_seed_all(cfg.seed + int(logical_rank))

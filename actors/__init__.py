@@ -1,25 +1,38 @@
-from .prompts_actor import LLMActor, GenConfig
-from .steering_vector_actor import SteeringActor, SteeringConfig
-from .next_token_probs_actor import TokenPlotConfig, TokenActor
-from .cross_entropy_actor import CrossEntropyPlotConfig, CrossEntropyActor
-from .log_odds_actor import LogOddsActor, LogOddsConfig
-from .mmlu_actor import MMLUActor, MMLUEvalConfig
+from .concept_probs_actor import BehaviorConfig
+from .concept_probs_continuous_actor import BehaviorConfig as ContinuousBehaviorConfig
+from .cross_entropy_actor import CrossEntropyPlotConfig
+from .log_odds_actor import LogOddsConfig
+from .mmlu_actor import MMLUEvalConfig
+from .next_token_probs_actor import TokenPlotConfig
+from .prompts_actor import GenConfig
+from .distributed_eval_actors import (
+    DistributedBehaviorActor,
+    DistributedContinuousBehaviorActor,
+    DistributedCrossEntropyActor,
+    DistributedLogOddsActor,
+    DistributedMMLUActor,
+    DistributedRescoreActor,
+)
+from .distributed_next_token_probs_actor import DistributedTokenActor
+from .distributed_prompt_actor import DistributedPromptActor
+from .distributed_steering_actor import SteeringConfig, DistributedSteeringActor
 
 __all__ = [
-    "LLMActor",
+    "BehaviorConfig",
+    "ContinuousBehaviorConfig",
+    "CrossEntropyPlotConfig",
     "GenConfig",
-    "SteeringActor",
+    "LogOddsConfig",
+    "MMLUEvalConfig",
     "SteeringConfig",
     "TokenPlotConfig",
-    "TokenActor",
-    "CrossEntropyPlotConfig",
-    "CrossEntropyActor",
-    "LogOddsActor",
-    "LogOddsConfig",
-    "MMLUActor",
-    "MMLUEvalConfig",
+    "DistributedBehaviorActor",
+    "DistributedContinuousBehaviorActor",
+    "DistributedCrossEntropyActor",
+    "DistributedLogOddsActor",
+    "DistributedMMLUActor",
+    "DistributedRescoreActor",
+    "DistributedPromptActor",
+    "DistributedSteeringActor",
+    "DistributedTokenActor",
 ]
-
-
-
-

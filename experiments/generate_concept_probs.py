@@ -1,111 +1,57 @@
 import argparse
 import asyncio
-from dataclasses import asdict
 from pathlib import Path
 
-import torch
-from monarch.actor import shutdown_context, this_host
+from monarch.actor import shutdown_context
 
-from actors.concept_probs_actor import BehaviorActor, BehaviorConfig
+from actors.concept_probs_actor import BehaviorConfig
 from actors.utils import discover_jobs
-from experiments.launcher_utils import run_ranked_jobs
+from experiments.distributed_runtime import add_distributed_args
+from experiments.unified_runs import run_behavior
+
 
 async def main_async(args):
-    # Behavior settings come from actor defaults.
-    cfg = BehaviorConfig(judge_model_name=args.judge_model)
-
+    config = BehaviorConfig(
+        judge_model_name=args.judge_model,
+        generator_dtype=args.dtype,
+        judge_dtype=args.dtype,
+    )
     steer_dir = Path(args.steer_dir)
     out_dir = Path(args.out_dir)
     contexts_file = Path(args.contexts_file)
-
     if not steer_dir.exists():
-        raise RuntimeError(f"--steer_dir '{steer_dir}' does not exist")
+        raise RuntimeError(f"--steer_dir {str(steer_dir)!r} does not exist")
     if not contexts_file.exists():
-        raise RuntimeError(f"--contexts_file '{contexts_file}' does not exist")
-
-    models = list(args.models)
-    jobs = discover_jobs(steer_dir, models)
+        raise RuntimeError(f"--contexts_file {str(contexts_file)!r} does not exist")
+    jobs = discover_jobs(steer_dir, list(args.models))
     if not jobs:
-        raise RuntimeError(
-            f"No (model, concept) pairs discovered under {steer_dir} for given models."
-        )
-
-    visible = torch.cuda.device_count()
-    if visible < 1:
-        raise RuntimeError("No CUDA devices visible.")
-
-    use_gpus = min(visible, len(jobs))
-    if args.max_gpus and args.max_gpus > 0:
-        use_gpus = min(use_gpus, args.max_gpus)
-
-    mesh = this_host().spawn_procs(per_host={args.dim: use_gpus})
-    print(mesh.to_table(), flush=True)
-
-    workers = mesh.spawn("behavior", BehaviorActor)
-
-    def actor_for(rank: int):
-        return workers.slice(**{args.dim: rank})
-
-    async def run_one(rank: int, model_name: str, concept_slug: str, concept_label: str):
-        return await actor_for(rank).compute_behavior_curves.call_one(
-            model_name=model_name,
-            concept_slug=concept_slug,
-            concept_label=concept_label,
-            # 0 => all layers; positive int => evenly sample that many layers.
-            block_idx_to_steer=(None if args.layers == 0 else int(args.layers)),
-            contexts_file=str(contexts_file),
-            steer_dir=str(steer_dir),
-            save_dir=str(out_dir),
-            layer_path=args.layer_path,
-            cfg_dict=asdict(cfg),
-            rank_hint=rank,
-        )
-
-    # As-completed scheduling keeps all GPUs busy during variable-length jobs.
-    async for rank, res in run_ranked_jobs(jobs, use_gpus, run_one):
-        if isinstance(res, Exception):
-            print(f"[gpu {rank}] EXCEPTION: {res}", flush=True)
-            raise res
-        if isinstance(res, dict) and res.get("ok"):
-            files = [rinfo.get("file") for rinfo in (res.get("results") or []) if rinfo.get("file")]
-            msg = files[0] if files else "(no files)"
-            print(f"[gpu {rank}] finished -> {msg}", flush=True)
-        else:
-            print(f"[gpu {rank}] unexpected result: {res}", flush=True)
+        raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
+    await run_behavior(
+        args,
+        config,
+        jobs,
+        steer_dir,
+        out_dir,
+        contexts_file,
+        continuous=False,
+    )
 
 
 def parse_args():
-    p = argparse.ArgumentParser()
-
-    p.add_argument("--models", nargs="+", required=True, help="HF model ids/paths for which steer vectors exist.")
-    p.add_argument("--judge_model", required=True, help="HF model id/path for the binary judge model.")
-
-    p.add_argument("--steer_dir", default="steering_vectors", help="Root: model_slug/concept_slug/layer_*.pt")
-    p.add_argument("--contexts_file", default="data/contexts.jsonl", help="JSONL contexts (negatives + per-concept positives)")
-    p.add_argument("--out_dir", default="behavior_data", help="Where to write .npz behavior curve files")
-
-    p.add_argument(
-        "--layers",
-        type=int,
-        default=4,
-        help="0 => all layers; positive int => evenly sample that many layers.",
-    )
-    p.add_argument(
-        "--layer_path",
-        default=None,
-        help="Override path to transformer block list (e.g., 'model.layers').",
-    )
-
-    # scheduling
-    p.add_argument("--dim", default="gpu", help="Mesh dimension name (use 'gpu' if your env uses that).")
-    p.add_argument("--max_gpus", type=int, default=0, help="Limit number of GPUs (0=auto)")
-
-    return p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models", nargs="+", required=True)
+    parser.add_argument("--judge_model", required=True)
+    parser.add_argument("--steer_dir", default="steering_vectors")
+    parser.add_argument("--contexts_file", default="data/contexts.jsonl")
+    parser.add_argument("--out_dir", default="behavior_data")
+    parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument("--layer_path", default=None)
+    add_distributed_args(parser)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
     try:
-        asyncio.run(main_async(args))
+        asyncio.run(main_async(parse_args()))
     finally:
         shutdown_context().get()
