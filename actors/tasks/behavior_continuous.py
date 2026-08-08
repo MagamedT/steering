@@ -13,14 +13,10 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
-from .utils import (
-    chunked_with_bounds,
-    count_negative_prompts,
-    find_block_list,
-    load_contexts_for_concept,
-    load_steer_vector,
-    model_slug,
-)
+from steering.batching import chunked_with_bounds
+from steering.data import count_negative_prompts, load_contexts_for_concept
+from steering.modeling import find_block_list, load_steering_vector
+from steering.naming import model_slug
 
 from .rubric_judge import (
     DEFAULT_CONCEPT_RUBRIC,
@@ -317,7 +313,7 @@ class BehaviorActor(Actor):
         results: List[Dict[str, Any]] = []
 
         for layer_idx in layer_indices:
-            steer_vec_cpu = load_steer_vector(
+            steer_vec_cpu = load_steering_vector(
                 steer_dir_path,
                 model_name,
                 concept_slug,

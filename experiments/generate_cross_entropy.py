@@ -4,10 +4,10 @@ from pathlib import Path
 
 from monarch.actor import shutdown_context
 
-from actors.cross_entropy_actor import CrossEntropyPlotConfig
-from actors.utils import discover_jobs
-from experiments.distributed_runtime import add_distributed_args
-from experiments.unified_runs import run_cross_entropy
+from actors.tasks.cross_entropy import CrossEntropyPlotConfig
+from steering.data import discover_steering_jobs
+from steering.runtime.pool import add_distributed_args
+from experiments.runners import run_cross_entropy
 
 
 async def main_async(args):
@@ -19,7 +19,7 @@ async def main_async(args):
         raise RuntimeError(f"--steer_dir {str(steer_dir)!r} does not exist")
     if not eval_parquet.exists():
         raise RuntimeError(f"--eval_parquet {str(eval_parquet)!r} does not exist")
-    jobs = discover_jobs(steer_dir, list(args.models))
+    jobs = discover_steering_jobs(steer_dir, list(args.models))
     if not jobs:
         raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
     await run_cross_entropy(

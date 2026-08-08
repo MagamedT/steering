@@ -10,7 +10,9 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from monarch.actor import Actor, endpoint
 
-from .utils import find_block_list, model_slug, load_steer_vector, load_contexts_for_concept
+from steering.data import load_contexts_for_concept
+from steering.modeling import find_block_list, load_steering_vector
+from steering.naming import model_slug
 
 
 def ensure_full_vocab_logits(logits, expected_vocab_size: int, tp_mesh=None):
@@ -140,7 +142,7 @@ class TokenActor(Actor):
 
         for block_idx in block_idx_to_steer:
             # Load steering vector for this (model, concept, layer)
-            steer_vec_cpu = load_steer_vector(steer_dir_path, model_name, concept_slug, block_idx)  # [H], float32 on CPU
+            steer_vec_cpu = load_steering_vector(steer_dir_path, model_name, concept_slug, block_idx)  # [H], float32 on CPU
             if cfg.normalize:
                 steer_vec_cpu = steer_vec_cpu / torch.norm(steer_vec_cpu).clamp_min(1e-8)
             for work_idx, ctx_idx in enumerate(selected_context_indices):
@@ -178,7 +180,7 @@ class TokenActor(Actor):
                             return tuple(out)
                         return x_steered
                     return _hook
-                
+
                 probs_list = []
                 # Split alpha grid to keep VRAM bounded on long sweeps.
                 for alpha_batch in torch.split(alphas, batch_size):
@@ -253,7 +255,7 @@ class TokenActor(Actor):
                     out_path,
                     alphas=alphas.cpu().numpy().astype(np.float32),     # [A]
                     probs_alphamax=probs_topk_alphamax,                                     # [A,K]
-                    probs_alphamin=probs_topk_alphamin,    
+                    probs_alphamin=probs_topk_alphamin,
                     token_alphamax=token_ids_alphamax,                                   # [K]
                     token_alphamin=token_ids_alphamin,
                     token_strs_alphamax=np.array(toks_alphamax, dtype=object),            # [K]

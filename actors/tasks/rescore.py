@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from monarch.actor import Actor, endpoint
 
-from .concept_probs_continuous_actor import BehaviorConfig
+from .behavior_continuous import BehaviorConfig
 from .rubric_judge import RubricJudgeDetails, rubric_completion_scores
 
 

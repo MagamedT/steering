@@ -3,9 +3,9 @@ import asyncio
 
 from monarch.actor import shutdown_context
 
-from actors.distributed_steering_actor import SteeringConfig
-from experiments.distributed_runtime import add_distributed_args
-from experiments.unified_runs import run_steering
+from actors.tasks.steering import SteeringConfig
+from steering.runtime.pool import add_distributed_args
+from experiments.runners import run_steering
 
 
 def pair_jobs(models, concepts, mode="product"):

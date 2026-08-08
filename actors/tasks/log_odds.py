@@ -8,12 +8,10 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
-from .utils import (
-    read_jsonl_texts,
-    model_slug,
-    chunked,
-)
-from .next_token_probs_actor import ensure_full_vocab_logits
+from steering.batching import chunked
+from steering.data import read_jsonl_texts
+from steering.naming import model_slug
+from .next_token_probs import ensure_full_vocab_logits
 
 @dataclass
 class LogOddsConfig:

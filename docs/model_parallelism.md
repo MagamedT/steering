@@ -12,6 +12,14 @@ with one process per GPU.
 There is no separate single-GPU implementation. A one-GPU run is the `k=1`
 case of the same actor, scheduler, model loader, and endpoint code.
 
+Runtime responsibilities are separated by package:
+
+- `steering/runtime/actor.py` owns rank topology and model loading;
+- `steering/runtime/placement.py` owns memory estimates and actor plans;
+- `steering/runtime/pool.py` owns Monarch process meshes and logical groups;
+- `steering/runtime/scheduler.py` assigns independent jobs to logical actors;
+- `actors/model_actors.py` binds model lifecycles to endpoints in `actors/tasks/`.
+
 The unified runtime is used by prompt generation, steering-vector extraction,
 next-token probability plots, log-odds, cross-entropy, MMLU, binary concept
 probabilities, continuous concept probabilities, and continuous-score

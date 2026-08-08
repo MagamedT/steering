@@ -11,15 +11,9 @@ import torch
 import numpy as np
 from monarch.actor import Actor, endpoint
 
-from .utils import (
-    extract_choice_from_continuation,
-    find_block_list,
-    load_steer_vector,
-    model_slug,
-    patch_tqdm_disable,
-    resolve_tasks,
-    task_scores_to_dict,
-)
+from steering.mmlu import disable_tqdm, extract_choice, resolve_tasks, task_scores_to_dict
+from steering.modeling import find_block_list, load_steering_vector
+from steering.naming import model_slug
 
 # --- Make logs safe for hyperactor_mesh (avoid Unicode tqdm bars, HF datasets bars, etc.) ---
 os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
@@ -33,7 +27,7 @@ os.environ.setdefault("OTEL_METRICS_EXPORTER", "none")
 os.environ.setdefault("OTEL_LOGS_EXPORTER", "none")
 
 
-patch_tqdm_disable()
+disable_tqdm()
 
 
 @dataclass
@@ -236,7 +230,7 @@ class MMLUActor(Actor):
                 for i in range(out_ids.shape[0]):
                     gen_part = out_ids[i, prompt_len:]
                     cont = self._tokenizer.decode(gen_part, skip_special_tokens=True)
-                    choice = extract_choice_from_continuation(cont) or "A"
+                    choice = extract_choice(cont) or "A"
                     letters.append(choice)
                 return letters
 
@@ -255,7 +249,7 @@ class MMLUActor(Actor):
         for block_idx in block_idx_to_steer:
             block_idx = int(block_idx)
 
-            steer_vec_cpu = load_steer_vector(steer_dir_path, model_name, concept_slug, block_idx)
+            steer_vec_cpu = load_steering_vector(steer_dir_path, model_name, concept_slug, block_idx)
             steer_vec = steer_vec_cpu.to(device, non_blocking=True)
 
             overall_scores: list[Optional[float]] = []

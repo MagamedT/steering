@@ -9,16 +9,15 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
-from .utils import (
-    chunked_with_bounds,
-    count_negative_prompts,
+from steering.batching import chunked_with_bounds
+from steering.data import count_negative_prompts, load_contexts_for_concept
+from steering.modeling import (
     find_block_list,
-    load_contexts_for_concept,
-    load_steer_vector,
+    load_steering_vector,
     maybe_apply_chat_template,
-    model_slug,
     one_token_ids,
 )
+from steering.naming import model_slug
 
 
 # -----------------------------
@@ -128,27 +127,27 @@ class BehaviorActor(Actor):
             if per_sample_cap and len(s) > per_sample_cap:
                 s = s[:per_sample_cap] + "…"
             cleaned.append(s)
-    
+
         return "\n\n--- SAMPLE ---\n\n".join(cleaned)
-    
-    
+
+
     def _judge_any_batch(self, samples: List[str], concept: str, cfg: BehaviorConfig) -> torch.Tensor:
         """
         B=1 judge: takes a list of texts, concatenates them, asks once:
           "is concept present anywhere?"
         Returns a tensor shape [1] with 0.0 or 1.0.
-    
+
         Uses regex parsing on decoded answer (tokenizer-robust).
         """
         assert self._judge_tok is not None and self._judge_model is not None
         tok = self._judge_tok
         model = self._judge_model
-    
+
         mega_text = self._join_samples_for_judge(samples)
-    
+
         user = cfg.judge_question_template.format(concept=concept, completion=mega_text)
         prompt = maybe_apply_chat_template(tok, cfg.judge_system_prompt, user, cfg.judge_use_chat_template)
-    
+
         enc = tok(
             [prompt],
             return_tensors="pt",
@@ -162,11 +161,11 @@ class BehaviorActor(Actor):
             attention_mask = torch.ones_like(input_ids, device=input_ids.device)
         else:
             attention_mask = attention_mask.to(input_ids.device, non_blocking=True)
-    
+
         input_len = int(input_ids.shape[1])
-    
+
         pad_id = tok.pad_token_id or tok.eos_token_id or tok.bos_token_id or 0
-    
+
         # Generate a few tokens so leading newline/space doesn't break parsing
         gen_kwargs = dict(
             max_new_tokens=4,
@@ -179,7 +178,7 @@ class BehaviorActor(Actor):
         )
         if tok.eos_token_id is not None:
             gen_kwargs["eos_token_id"] = int(tok.eos_token_id)
-    
+
         amp_judge = torch.autocast(
             device_type=self.device.type,
             dtype=torch.bfloat16,
@@ -191,15 +190,15 @@ class BehaviorActor(Actor):
                 attention_mask=attention_mask,
                 **gen_kwargs,
             )
-    
+
         # Decode ONLY the newly generated tokens (critical!)
         gen_ids = out_ids[:, input_len:]  # [1, <=4]
         ans = tok.batch_decode(gen_ids, skip_special_tokens=True)[0]
-    
+
         # Parse first 0/1
         m = re.match(r"^\s*([01])", ans)
         y = 1.0 if (m and m.group(1) == "1") else 0.0
-    
+
         return torch.tensor([y], device=input_ids.device, dtype=torch.float32)
 
 
@@ -391,7 +390,7 @@ class BehaviorActor(Actor):
         # main: per layer
         for layer_idx in layer_indices:
             # load steering vector
-            steer_vec_cpu = load_steer_vector(steer_dir_path, model_name, concept_slug, int(layer_idx))
+            steer_vec_cpu = load_steering_vector(steer_dir_path, model_name, concept_slug, int(layer_idx))
             if cfg.normalize:
                 steer_vec_cpu = steer_vec_cpu / torch.norm(steer_vec_cpu).clamp_min(1e-8)
             steer_vec = steer_vec_cpu.to(self.device, non_blocking=True).to(torch.float32)
@@ -420,14 +419,14 @@ class BehaviorActor(Actor):
 
 
                         grouped_completions = self._generate_completions(prompts, cfg)  # List[List[str]] length B, each length K
-                        
+
                         # Judge each context with ONE prompt (B=1 each time)
                         p1_context = []
                         for samples in grouped_completions:
                             # Any-of-K judge: one binary decision for the grouped samples of this context.
                             p1 = self._judge_any_batch(samples, concept=concept_label, cfg=cfg)  # [1]
                             p1_context.append(p1)
-                        
+
                         p1_context = torch.cat(p1_context, dim=0)  # [B] values 0/1
                         p1_mean = p1_context.cpu().numpy().astype(np.float32)
                         p1_by_ctx[start:end, ai] = p1_mean

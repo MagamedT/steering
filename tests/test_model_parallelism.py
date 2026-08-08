@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import torch
 
-from actors.model_placement import GpuMemory, ModelEstimate, plan_actor_mesh
-from actors.next_token_probs_actor import ensure_full_vocab_logits
-from experiments.distributed_runtime import group_bounds, leader_result
-from experiments.unified_runs import (
+from steering.runtime.placement import GpuMemory, ModelEstimate, plan_actor_mesh
+from actors.tasks.next_token_probs import ensure_full_vocab_logits
+from steering.runtime.pool import group_bounds, leader_result
+from experiments.runners import (
     plot_work_items,
     prompt_phase_jobs,
     prompt_phases,
@@ -141,7 +141,7 @@ class UnifiedModelParallelismTests(unittest.TestCase):
             ("model", "joy", "Joy", 1, 40),
         ]
         with patch(
-            "experiments.unified_runs.load_contexts_for_concept",
+            "experiments.runners.load_contexts_for_concept",
             return_value=(["negative", "positive"], [0, 1]),
         ):
             actual = plot_work_items(jobs, "contexts.jsonl", [39, 40])

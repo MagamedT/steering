@@ -14,10 +14,10 @@ from pathlib import Path
 
 from monarch.actor import shutdown_context
 
-from actors.mmlu_actor import MMLUEvalConfig
-from actors.utils import discover_jobs
-from experiments.distributed_runtime import add_distributed_args
-from experiments.unified_runs import run_mmlu
+from actors.tasks.mmlu import MMLUEvalConfig
+from steering.data import discover_steering_jobs
+from steering.runtime.pool import add_distributed_args
+from experiments.runners import run_mmlu
 
 
 async def main_async(args):
@@ -29,7 +29,7 @@ async def main_async(args):
     out_dir = Path(args.out_dir)
     if not steer_dir.exists():
         raise RuntimeError(f"--steer_dir {str(steer_dir)!r} does not exist")
-    jobs = discover_jobs(steer_dir, list(args.models))
+    jobs = discover_steering_jobs(steer_dir, list(args.models))
     if not jobs:
         raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
     await run_mmlu(args, config, jobs, steer_dir, out_dir)

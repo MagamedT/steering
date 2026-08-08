@@ -3,9 +3,9 @@ import asyncio
 
 from monarch.actor import shutdown_context
 
-from actors.prompts_actor import GenConfig
-from experiments.distributed_runtime import add_distributed_args
-from experiments.unified_runs import run_prompts
+from actors.tasks.prompts import GenConfig
+from steering.runtime.pool import add_distributed_args
+from experiments.runners import run_prompts
 
 
 async def main_async(args):

@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 import torch
 
-from .next_token_probs_actor import ensure_full_vocab_logits
+from .next_token_probs import ensure_full_vocab_logits
 
 SINGLE_ITEM_RUBRIC_JUDGE_PROMPT = """
 Decide whether the single rubric item is met by the assistant response.

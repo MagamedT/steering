@@ -10,8 +10,10 @@ import torch
 import torch.nn.functional as F
 from monarch.actor import Actor, endpoint
 
-from .utils import find_block_list, model_slug, load_steer_vector, iter_eval_blocks_from_parquet
-from .next_token_probs_actor import ensure_full_vocab_logits
+from steering.data import iter_eval_blocks_from_parquet
+from steering.modeling import find_block_list, load_steering_vector
+from steering.naming import model_slug
+from .next_token_probs import ensure_full_vocab_logits
 
 
 @dataclass
@@ -102,7 +104,7 @@ class CrossEntropyActor(Actor):
         # Pre-load all steering vectors once (so we can scan the parquet once).
         block_idx_to_steer = [int(i) for i in block_idx_to_steer]
         steer_vecs_gpu = {
-            int(b): load_steer_vector(steer_dir_path, model_name, concept_slug, int(b)).to(device, non_blocking=True)
+            int(b): load_steering_vector(steer_dir_path, model_name, concept_slug, int(b)).to(device, non_blocking=True)
             for b in block_idx_to_steer
         }
 

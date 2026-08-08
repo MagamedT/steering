@@ -8,7 +8,7 @@ from typing import Any, Sequence
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
-from actors.model_placement import (
+from .placement import (
     ActorPlan,
     combine_model_estimates,
     discover_gpu_memory,

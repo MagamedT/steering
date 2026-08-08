@@ -1,4 +1,3 @@
-# prompts_actor.py / llm_actor.py
 import json
 from pathlib import Path
 import asyncio
@@ -8,7 +7,7 @@ import torch
 from dataclasses import dataclass
 from monarch.actor import Actor, endpoint
 
-from .utils import slugify
+from steering.naming import slugify
 
 
 @dataclass

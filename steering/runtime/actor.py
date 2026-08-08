@@ -8,7 +8,7 @@ import torch.distributed as dist
 from monarch.actor import endpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .model_placement import dtype_from_name
+from .placement import dtype_from_name
 
 
 class DistributedActorMixin:

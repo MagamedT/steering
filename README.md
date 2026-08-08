@@ -1,6 +1,6 @@
 # Towards Understanding Steering Strength codebase
 
-Codebase for steering-vector experiments used in [Towards Understanding Steering Strength](https://arxiv.org/abs/2602.02712).  
+Codebase for steering-vector experiments used in [Towards Understanding Steering Strength](https://arxiv.org/abs/2602.02712).
 
 ## What This Repository Does
 
@@ -17,18 +17,19 @@ This repository implements activation steering for causal LMs:
 
 ## Project Structure
 
-- `experiments/`: experiment entry points and launcher utilities.
-- `experiments/generate_prompts.py`: builds concept prompt datasets (`*_positive.jsonl`, `*_negative.jsonl`).
-- `experiments/generate_steering_vectors.py`: computes steering vectors and saves `layer_<i>.pt`.
-- `experiments/generate_next_token_probs.py`: runs alpha sweeps and saves token probability curves (`.npz`).
-- `experiments/generate_concept_probs.py`: concept presence probabilities sweeps with a judge model (`.npz`).
-- `experiments/generate_cross_entropy.py`: cross-entropy vs alpha (`.npz`).
-- `experiments/generate_eval_dataset.py`: downloads a filtered eval parquet shard (for cross-entropy runs).
-- `experiments/generate_mmlu.py`: MMLU vs alpha (`.json`).
-- `experiments/generate_log_odds.py`: non-steered token log-odds baseline (`.npz`).
-- `plot_probs.py`: plotting/analysis utilities.
-- `actors/`: GPU actor implementations used by torchmonarch.
-- `example_run.sh`: example Slurm batch script showing how to run all experiments.
+- `experiments/generate_*.py`: stable CLI entry points; argument parsing only.
+- `experiments/runners.py`: experiment orchestration and job construction.
+- `actors/tasks/`: endpoint implementations grouped by evaluation task.
+- `actors/model_actors.py`: binds task endpoints to distributed model lifecycles.
+- `steering/data.py`: prompt/context discovery and parquet evaluation streams.
+- `steering/modeling.py`: transformer-block, steering-vector, and tokenizer helpers.
+- `steering/batching.py`, `steering/naming.py`, `steering/mmlu.py`: focused shared helpers.
+- `steering/runtime/`: topology, model placement, actor pools, and scheduling.
+- `tests/`: CPU end-to-end coverage and topology/planner unit tests.
+- `docs/`: architecture and operational constraints.
+
+The public experiment commands remain at their original paths; reusable code is
+kept out of the CLI modules and generic catch-all utility files are avoided.
 
 ## Requirements
 
@@ -265,7 +266,7 @@ Most outputs are grouped by model slug and concept slug:
   `--max_gpus`, `--gpu_utilization`, `--inference_headroom`, and
   `--plan_only`.
 - Experiment defaults live in the corresponding config dataclasses under
-  `actors/`.
+  `actors/tasks/`.
 
 
 ## Citation

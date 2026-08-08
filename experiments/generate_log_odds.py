@@ -5,13 +5,13 @@ from pathlib import Path
 
 from monarch.actor import shutdown_context
 
-from actors.log_odds_actor import LogOddsConfig
-from actors.utils import model_slug, slugify
-from experiments.distributed_runtime import add_distributed_args
-from experiments.unified_runs import run_log_odds
+from actors.tasks.log_odds import LogOddsConfig
+from steering.naming import model_slug, slugify
+from steering.runtime.pool import add_distributed_args
+from experiments.runners import run_log_odds
 
 
-def discover_jobs(prompts_dir: Path, models: list[str]):
+def discover_prompt_jobs(prompts_dir: Path, models: list[str]):
     positives = {
         path.name[: -len("_positive.jsonl")]: path
         for path in prompts_dir.glob("*_positive.jsonl")
@@ -39,7 +39,7 @@ async def main_async(args):
     out_dir = Path(args.out_dir)
     if not prompts_path.exists():
         raise RuntimeError(f"--prompts_dir {str(prompts_path)!r} does not exist")
-    jobs = discover_jobs(prompts_path, list(args.models))
+    jobs = discover_prompt_jobs(prompts_path, list(args.models))
     if args.concepts:
         allowed = {slugify(concept) for concept in args.concepts}
         jobs = [job for job in jobs if job[1] in allowed]

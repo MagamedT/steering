@@ -4,10 +4,10 @@ from pathlib import Path
 
 from monarch.actor import shutdown_context
 
-from actors.concept_probs_continuous_actor import BehaviorConfig
-from actors.utils import discover_jobs
-from experiments.distributed_runtime import add_distributed_args
-from experiments.unified_runs import run_behavior
+from actors.tasks.behavior_continuous import BehaviorConfig
+from steering.data import discover_steering_jobs
+from steering.runtime.pool import add_distributed_args
+from experiments.runners import run_behavior
 
 
 async def main_async(args):
@@ -33,7 +33,7 @@ async def main_async(args):
         raise RuntimeError(f"--steer_dir {str(steer_dir)!r} does not exist")
     if not contexts_file.exists():
         raise RuntimeError(f"--contexts_file {str(contexts_file)!r} does not exist")
-    jobs = discover_jobs(steer_dir, list(args.models))
+    jobs = discover_steering_jobs(steer_dir, list(args.models))
     if not jobs:
         raise RuntimeError(f"No model/concept pairs found under {steer_dir}")
     await run_behavior(

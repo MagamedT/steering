@@ -23,19 +23,19 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from actors import concept_probs_actor
-from actors import concept_probs_continuous_actor
-from actors import rubric_judge
-from actors import rescore_actor
-from actors import cross_entropy_actor
-from actors import log_odds_actor
-from actors import mmlu_actor
-from actors import prompts_actor
-from actors import next_token_probs_actor
-from actors import distributed_steering_actor
-from actors.model_placement import GpuMemory
-from experiments import distributed_runtime
-from actors.utils import model_slug
+from actors.tasks import behavior as concept_probs_actor
+from actors.tasks import behavior_continuous as concept_probs_continuous_actor
+from actors.tasks import rubric_judge
+from actors.tasks import rescore as rescore_actor
+from actors.tasks import cross_entropy as cross_entropy_actor
+from actors.tasks import log_odds as log_odds_actor
+from actors.tasks import mmlu as mmlu_actor
+from actors.tasks import prompts as prompts_actor
+from actors.tasks import next_token_probs as next_token_probs_actor
+from actors.tasks import steering as distributed_steering_actor
+from steering.runtime.placement import GpuMemory
+from steering.runtime import pool as distributed_runtime
+from steering.naming import model_slug
 from experiments import generate_concept_probs
 from experiments import generate_concept_probs_continuous
 from experiments import generate_cross_entropy

@@ -7,8 +7,11 @@ from pathlib import Path
 import torch
 from monarch.actor import Actor, endpoint
 
-from actors.utils import chunked, find_block_list, model_slug, read_jsonl_texts
-from .distributed import DistributedActorMixin
+from steering.batching import chunked
+from steering.data import read_jsonl_texts
+from steering.modeling import find_block_list
+from steering.naming import model_slug
+from steering.runtime.actor import DistributedActorMixin
 
 
 @dataclass
