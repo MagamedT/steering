@@ -2,7 +2,7 @@
 
 Activation-steering experiments for causal language models, including prompt generation, steering-vector extraction, and evaluation across steering strengths.
 
-This repository contains the code for [*Towards Understanding Steering Strength*](https://arxiv.org/abs/2602.02712). It can run a model on one GPU or split it across several GPUs.
+This repository contains the code for [*Towards Understanding Steering Strength*](https://arxiv.org/abs/2602.02712). It can run a model on one GPU or split it across several GPUs (tensor parallelism).
 
 ## What it does
 
