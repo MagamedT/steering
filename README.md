@@ -416,7 +416,7 @@ If you use this repository, cite:
 @article{taimeskhanov2026towards,
   title={Towards Understanding Steering Strength},
   author={Taimeskhanov, Magamed and Vaiter, Samuel and Garreau, Damien},
-  journal={arXiv preprint arXiv:2602.02712},
+  journal={ICML},
   year={2026}
 }
 ```
