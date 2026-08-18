@@ -151,9 +151,10 @@ class TokenActor(Actor):
                 attn_mask = enc["attention_mask"]      # [1, T]
                 token_amount = int(input_ids.shape[1])
 
-                # Repeat for all α
-                input_ids = input_ids.repeat(batch_size, 1).to(self.device, non_blocking=True)             # [alpha_amount, token_amount]
-                attn_mask = attn_mask.repeat(batch_size, 1).to(self.device, non_blocking=True)            # [alpha_amount, token_amount]
+                # Keep a maximum-sized input batch on device and slice it per α batch.
+                # The same context is evaluated at every steering strength.
+                input_ids = input_ids.repeat(batch_size, 1).to(self.device, non_blocking=True)
+                attn_mask = attn_mask.repeat(batch_size, 1).to(self.device, non_blocking=True)
 
                 # Precompute last-token mask (if requested)
                 if cfg.apply_last_token_only:
@@ -178,56 +179,70 @@ class TokenActor(Actor):
                         return x_steered
                     return _hook
 
-                probs_list = []
-                # Split alpha grid to keep VRAM bounded on long sweeps.
+                def forward_alpha_batch(alpha_batch):
+                    """Return full-vocabulary logits for one bounded α batch."""
+                    current_batch_size = int(alpha_batch.shape[0])
+                    batch_input_ids = input_ids[:current_batch_size]
+                    batch_attention_mask = attn_mask[:current_batch_size]
+                    batch_last_mask = (
+                        last_mask[:current_batch_size]
+                        if last_mask is not None
+                        else None
+                    )
+                    handle = blocks[block_idx].register_forward_hook(
+                        make_hook(alpha_batch, steer_vec_gpu, batch_last_mask)
+                    )
+                    try:
+                        with torch.inference_mode():
+                            out = model(
+                                input_ids=batch_input_ids,
+                                attention_mask=batch_attention_mask,
+                            )
+                            logits = ensure_full_vocab_logits(
+                                out.logits,
+                                int(model.config.vocab_size),
+                                self.tp_mesh,
+                            )
+                            return logits[:, -1, :].to(torch.float32)
+                    finally:
+                        handle.remove()
+
+                # Select the reported tokens from the two sweep endpoints first.
+                # This costs two small forwards, but avoids copying the full
+                # [alpha, vocabulary] probability matrix to CPU.
+                alpha_min = alphas[:1].to(input_ids.device)
+                alpha_max = alphas[-1:].to(input_ids.device)
+                topk = min(int(cfg.top_k), int(model.config.vocab_size))
+                token_ids_alphamin = torch.softmax(
+                    forward_alpha_batch(alpha_min)[0], dim=-1
+                ).topk(topk, largest=True).indices
+                token_ids_alphamax = torch.softmax(
+                    forward_alpha_batch(alpha_max)[0], dim=-1
+                ).topk(topk, largest=True).indices
+
+                probs_alphamax_batches = []
+                probs_alphamin_batches = []
+                # Split the α grid to keep VRAM bounded on long sweeps. Only
+                # the selected curves cross the GPU/CPU boundary.
                 for alpha_batch in torch.split(alphas, batch_size):
-                    # α batch on GPU
                     alpha_batch = alpha_batch.to(input_ids.device)
-                    current_batch_size = alpha_batch.shape[0]
-                    if current_batch_size < batch_size:
-                        # trim for the last batch if smaller size than batch_size
-                        input_ids = input_ids[:current_batch_size]            # [alpha_amount, token_amount]
-                        attn_mask = attn_mask[:current_batch_size]            # [alpha_amount, token_amount]
-                        if cfg.apply_last_token_only:
-                            last_mask = last_mask[:current_batch_size] # [alpha_amount, token_amount, 1 = corresponds to the residual path dimension]
-
-                    handle = blocks[block_idx].register_forward_hook(make_hook(alpha_batch, steer_vec_gpu, last_mask))
-
-                    # Forward once for all α
-                    with torch.inference_mode():
-                        out = model(input_ids=input_ids, attention_mask=attn_mask)
-                        logits = ensure_full_vocab_logits(
-                            out.logits,
-                            int(model.config.vocab_size),
-                            self.tp_mesh,
-                        )  # [A, T, V]
-                        query_token_logits = logits[:, -1, :].to(torch.float32)  # [A, V]
-                        if self.is_leader:
-                            probs_list.append(torch.softmax(query_token_logits, dim=-1).cpu())  # fp32 softmax
-
-                    handle.remove()
+                    query_token_logits = forward_alpha_batch(alpha_batch)
+                    probs = torch.softmax(query_token_logits, dim=-1)
+                    if self.is_leader:
+                        probs_alphamax_batches.append(
+                            probs[:, token_ids_alphamax].cpu()
+                        )
+                        probs_alphamin_batches.append(
+                            probs[:, token_ids_alphamin].cpu()
+                        )
 
                 if not self.is_leader:
                     if (work_idx % progress_mod) == 0:
                         await asyncio.sleep(0)
                     continue
 
-                # stack the probs_list along alpha dim
-                probs = torch.cat(probs_list, dim = 0)
-                # Choose top-k tokens based probs of query token
-                topk = min(int(cfg.top_k), probs.shape[-1])
-                # get the topk probs for alpha_max
-                idx_topk_alphamax = probs[-1].topk(topk, largest=True)
-                idx_topk_alphamin = probs[0].topk(topk, largest=True)
-                # Keep both ends of the alpha sweep to analyze asymmetric token shifts.
-                token_ids_alphamax, token_ids_alphamin = idx_topk_alphamax.indices, idx_topk_alphamin.indices  # [K] on GPU
-
-                # Slice curves
-                probs_topk_alphamax, probs_topk_alphamin = probs[:, token_ids_alphamax], probs[:, token_ids_alphamin]                  # [A, K]
-
-                ## clean
-                # Move to numpy
-                probs_topk_alphamax, probs_topk_alphamin = probs_topk_alphamax.to(torch.float32).cpu().numpy(), probs_topk_alphamin.to(torch.float32).cpu().numpy()
+                probs_topk_alphamax = torch.cat(probs_alphamax_batches, dim=0).numpy()
+                probs_topk_alphamin = torch.cat(probs_alphamin_batches, dim=0).numpy()
                 token_ids_alphamax, token_ids_alphamin = token_ids_alphamax.to(torch.int32).cpu().numpy(), token_ids_alphamin.to(torch.int32).cpu().numpy()
                 toks_alphamax, toks_alphamin = [tokenizer.decode([int(t)]) for t in token_ids_alphamax.tolist()], [tokenizer.decode([int(t)]) for t in token_ids_alphamin.tolist()]
 
@@ -241,7 +256,7 @@ class TokenActor(Actor):
                     "context_source_line": int(ctx_source_line),
                     "layer_idx": int(block_idx),
                     "seq_len": int(token_amount),
-                    "vocab_size": int(probs.shape[-1]),
+                    "vocab_size": int(model.config.vocab_size),
                     "top_k": int(topk),
                     "apply_last_token_only": bool(cfg.apply_last_token_only),
                     "alphas": {"start": float(alphas[0].item()), "end": float(alphas[-1].item()), "steps": int(alpha_amount)},

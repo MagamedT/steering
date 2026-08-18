@@ -495,7 +495,15 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                     out_dir=str(plot_out), layers=["0"], layer_path=None,
                     dim="gpu", max_gpus=1, seed=0,
                 ))
-                self.assertTrue(any(plot_out.rglob("*.npz")))
+                plot_path = next(plot_out.rglob("*.npz"), None)
+                self.assertIsNotNone(plot_path)
+                with np.load(plot_path, allow_pickle=True) as plot_data:
+                    self.assertEqual(plot_data["probs_alphamax"].shape, (3, 2))
+                    self.assertEqual(plot_data["probs_alphamin"].shape, (3, 2))
+                    self.assertTrue(
+                        np.all((0.0 <= plot_data["probs_alphamax"]) &
+                               (plot_data["probs_alphamax"] <= 1.0))
+                    )
 
                 concept_probs_out = root / "concept_probs"
                 await generate_concept_probs.main_async(runtime_args(
