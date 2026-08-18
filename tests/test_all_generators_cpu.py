@@ -311,7 +311,7 @@ def cpu_only(model_path: Path):
                     alpha_end=1,
                     alpha_steps=3,
                     n_samples_per_context=1,
-                    gen_context_batch_size=1,
+                    gen_context_batch_size=2,
                     max_prompt_length=16,
                     max_new_tokens=1,
                     judge_max_prompt_length=16,
@@ -438,6 +438,67 @@ def fake_deepeval():
 
 class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
     """Exercise every generator without a GPU or model download."""
+
+    def test_binary_judge_scores_context_groups_in_one_batch(self):
+        """Pad two judge prompts and generate both binary verdicts together."""
+        class FakeTokenizer:
+            pad_token_id = 0
+            eos_token_id = 2
+            bos_token_id = 1
+
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, prompts, **kwargs):
+                self.calls.append((prompts, kwargs))
+                return {
+                    "input_ids": torch.tensor([[0, 10, 11], [10, 11, 12]]),
+                    "attention_mask": torch.tensor([[0, 1, 1], [1, 1, 1]]),
+                }
+
+            def batch_decode(self, token_ids, **_kwargs):
+                return [" 1", "\n0"] if token_ids.shape[0] == 2 else []
+
+        class FakeJudge:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, input_ids, attention_mask, **_kwargs):
+                self.calls += 1
+                return torch.cat(
+                    (input_ids, torch.tensor([[13], [12]], dtype=input_ids.dtype)),
+                    dim=1,
+                )
+
+        tokenizer = FakeTokenizer()
+        judge = FakeJudge()
+        actor = SimpleNamespace(
+            _judge_tok=tokenizer,
+            _judge_model=judge,
+            device=torch.device("cpu"),
+        )
+        actor._join_samples_for_judge = lambda samples: (
+            concept_probs_actor.ConceptProbsActor._join_samples_for_judge(
+                actor,
+                samples,
+            )
+        )
+        cfg = concept_probs_actor.ConceptProbsConfig(
+            judge_model_name="judge",
+            judge_use_chat_template=False,
+        )
+
+        scores = concept_probs_actor.ConceptProbsActor._judge_context_batches(
+            actor,
+            [["first sample"], ["second sample"]],
+            concept="joy",
+            cfg=cfg,
+        )
+
+        torch.testing.assert_close(scores, torch.tensor([1.0, 0.0]))
+        self.assertEqual(judge.calls, 1)
+        self.assertEqual(len(tokenizer.calls), 1)
+
     def test_continuous_pair_probability(self):
         """Check that true and false logits produce the expected probability."""
         pair = rubric_judge.pair_probability

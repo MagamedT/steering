@@ -118,21 +118,44 @@ class ConceptProbsActor(Actor):
         return "\n\n--- SAMPLE ---\n\n".join(cleaned)
 
 
-    def _judge_any_batch(self, samples: List[str], concept: str, cfg: ConceptProbsConfig) -> torch.Tensor:
-        """Return whether any sample expresses the concept."""
+    def _judge_context_batches(
+        self,
+        sample_groups: List[List[str]],
+        concept: str,
+        cfg: ConceptProbsConfig,
+    ) -> torch.Tensor:
+        """Return one binary concept score for each group of completions.
+
+        A group contains all generated completions for one source context.  The
+        judge prompts are padded and generated together, so a generator context
+        batch needs one judge call rather than one call per context.
+        """
         assert self._judge_tok is not None and self._judge_model is not None
+        if not sample_groups:
+            return torch.empty(0, device=self.device, dtype=torch.float32)
         tok = self._judge_tok
         model = self._judge_model
 
-        mega_text = self._join_samples_for_judge(samples)
-
-        user = cfg.judge_question_template.format(concept=concept, completion=mega_text)
-        prompt = maybe_apply_chat_template(tok, cfg.judge_system_prompt, user, cfg.judge_use_chat_template)
+        prompts = []
+        for samples in sample_groups:
+            mega_text = self._join_samples_for_judge(samples)
+            user = cfg.judge_question_template.format(
+                concept=concept,
+                completion=mega_text,
+            )
+            prompts.append(
+                maybe_apply_chat_template(
+                    tok,
+                    cfg.judge_system_prompt,
+                    user,
+                    cfg.judge_use_chat_template,
+                )
+            )
 
         enc = tok(
-            [prompt],
+            prompts,
             return_tensors="pt",
-            padding=False,          # B=1 -> no padding needed
+            padding=True,
             truncation=True,
             max_length=cfg.judge_max_prompt_length,
         )
@@ -173,14 +196,23 @@ class ConceptProbsActor(Actor):
             )
 
         # Decode ONLY the newly generated tokens (critical!)
-        gen_ids = out_ids[:, input_len:]  # [1, <=4]
-        ans = tok.batch_decode(gen_ids, skip_special_tokens=True)[0]
-
-        # Parse first 0/1
-        m = re.match(r"^\s*([01])", ans)
-        y = 1.0 if (m and m.group(1) == "1") else 0.0
-
-        return torch.tensor([y], device=input_ids.device, dtype=torch.float32)
+        gen_ids = out_ids[:, input_len:]
+        answers = tok.batch_decode(gen_ids, skip_special_tokens=True)
+        scores = [
+            (
+                1.0
+                if (match := re.match(r"^\s*([01])", answer))
+                and match.group(1) == "1"
+                else 0.0
+            )
+            for answer in answers
+        ]
+        if len(scores) != len(sample_groups):
+            raise RuntimeError(
+                "Judge returned an unexpected number of answers: "
+                f"got {len(scores)}, expected {len(sample_groups)}."
+            )
+        return torch.tensor(scores, device=input_ids.device, dtype=torch.float32)
 
 
     # Generation
@@ -405,14 +437,11 @@ class ConceptProbsActor(Actor):
 
                         grouped_completions = self._generate_completions(prompts, cfg)  # List[List[str]] length B, each length K
 
-                        # Judge each context with ONE prompt (B=1 each time)
-                        p1_context = []
-                        for samples in grouped_completions:
-                            # Judge the sample group once for this context.
-                            p1 = self._judge_any_batch(samples, concept=concept_label, cfg=cfg)  # [1]
-                            p1_context.append(p1)
-
-                        p1_context = torch.cat(p1_context, dim=0)  # [B] values 0/1
+                        p1_context = self._judge_context_batches(
+                            grouped_completions,
+                            concept=concept_label,
+                            cfg=cfg,
+                        )
                         p1_mean = p1_context.cpu().numpy().astype(np.float32)
                         p1_by_ctx[start:end, ai] = p1_mean
 
