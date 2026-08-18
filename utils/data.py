@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 import torch
-from datasets import load_dataset
 
 from .naming import model_slug
 
@@ -235,6 +234,7 @@ def iter_eval_blocks_from_parquet(
             used_pyarrow = False
 
     if not used_pyarrow:
+        from datasets import load_dataset
         dataset = load_dataset(
             "parquet", data_files=str(parquet_path), split="train", streaming=True
         )

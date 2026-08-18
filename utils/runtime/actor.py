@@ -8,7 +8,6 @@ from typing import Iterable
 import torch
 import torch.distributed as dist
 from monarch.actor import endpoint
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .placement import dtype_from_name
 
@@ -65,6 +64,8 @@ class DistributedActorMixin:
         trust_remote_code: bool = False,
     ):
         """Load a tokenizer and model for this actor GPU group."""
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             use_fast=False,
