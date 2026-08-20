@@ -127,6 +127,42 @@ class ConceptProbsActor(Actor):
                 )
         return details.scores
 
+    def _judge_context_groups(
+        self,
+        sample_groups: Sequence[Sequence[str]],
+        concept: str,
+        cfg: ConceptProbsConfig,
+    ) -> torch.Tensor:
+        """Score every completion in a context batch with shared judge calls.
+
+        ``rubric_completion_scores`` already pads and chunks independent prompts
+        according to ``judge_batch_size``.  Flattening the generated completion
+        groups lets it batch work across contexts as well as within a context.
+        """
+        if not sample_groups:
+            return torch.empty((0, 0), dtype=torch.float32)
+        sample_count = len(sample_groups[0])
+        if sample_count < 1 or any(
+            len(group) != sample_count for group in sample_groups
+        ):
+            raise ValueError(
+                "Every context must have the same nonzero number of samples."
+            )
+
+        flat_samples = [sample for group in sample_groups for sample in group]
+        scores = self._judge_completion_scores(
+            flat_samples,
+            concept=concept,
+            cfg=cfg,
+        ).reshape(-1)
+        expected_count = len(sample_groups) * sample_count
+        if scores.numel() != expected_count:
+            raise RuntimeError(
+                "Judge returned an unexpected number of scores: "
+                f"got {scores.numel()}, expected {expected_count}."
+            )
+        return scores.reshape(len(sample_groups), sample_count)
+
     def _generate_completions(
         self,
         prompts: List[str],
@@ -369,7 +405,6 @@ class ConceptProbsActor(Actor):
                             prompts.append(prompt)
 
                         grouped = self._generate_completions(prompts, cfg)
-                        context_means: List[float] = []
                         for offset, samples in enumerate(grouped):
                             if len(samples) != sample_count:
                                 raise RuntimeError(
@@ -381,20 +416,13 @@ class ConceptProbsActor(Actor):
                                 alpha_index,
                                 :,
                             ] = np.asarray(samples, dtype=object)
-                            scores = self._judge_completion_scores(
-                                samples,
-                                concept=concept_label,
-                                cfg=cfg,
-                                instruction=context_batch[offset],
-                            )
-                            scores_cpu = scores.detach().to(
-                                device="cpu",
-                                dtype=torch.float32,
-                            ).reshape(-1)
-                            if scores_cpu.numel() != sample_count:
-                                raise RuntimeError(
-                                    "Judge returned an unexpected number of scores."
-                                )
+                        scores_by_context = self._judge_context_groups(
+                            grouped,
+                            concept=concept_label,
+                            cfg=cfg,
+                        ).detach().to(device="cpu", dtype=torch.float32)
+                        context_means: List[float] = []
+                        for offset, scores_cpu in enumerate(scores_by_context):
                             completion_scores_by_ctx[
                                 start + offset,
                                 alpha_index,

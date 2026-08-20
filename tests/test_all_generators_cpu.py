@@ -330,7 +330,7 @@ def cpu_only(model_path: Path):
                     alpha_end=1,
                     alpha_steps=3,
                     n_samples_per_context=1,
-                    gen_context_batch_size=1,
+                    gen_context_batch_size=2,
                     max_prompt_length=16,
                     max_new_tokens=1,
                     judge_max_prompt_length=16,
@@ -438,6 +438,34 @@ def fake_deepeval():
 
 class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
     """Exercise every generator without a GPU or model download."""
+
+    def test_continuous_judge_scores_context_groups_in_one_batch(self):
+        """Flatten context samples once and restore their context grouping."""
+        calls = []
+
+        def fake_scores(samples, concept, cfg):
+            calls.append((samples, concept, cfg))
+            return torch.tensor([0.1, 0.2, 0.3, 0.4])
+
+        actor = SimpleNamespace(_judge_completion_scores=fake_scores)
+        cfg = concept_probs_continuous_actor.ConceptProbsConfig(
+            judge_model_name="judge"
+        )
+        scores = concept_probs_continuous_actor.ConceptProbsActor._judge_context_groups(
+            actor,
+            [["first-a", "first-b"], ["second-a", "second-b"]],
+            concept="joy",
+            cfg=cfg,
+        )
+
+        torch.testing.assert_close(
+            scores,
+            torch.tensor([[0.1, 0.2], [0.3, 0.4]]),
+        )
+        self.assertEqual(
+            calls,
+            [(["first-a", "first-b", "second-a", "second-b"], "joy", cfg)],
+        )
 
     def test_binary_judge_scores_context_groups_in_one_batch(self):
         """Pad two judge prompts and generate both binary verdicts together."""
