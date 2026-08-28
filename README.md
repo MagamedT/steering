@@ -274,19 +274,15 @@ save_figure(figure, "concept_probs.png")
 
 ## Automatic batch sizing
 
-GPU-facing batch fields default to `0` (automatic). After all models for an actor
-are loaded, `utils.batch_size` computes a critical size from live free VRAM,
+GPU batch fields default to `0` (automatic). After all models for an actor
+are loaded, `utils.batch_size` computes a critical size from free VRAM,
 model dimensions, dtype, sequence length, attention/sampling/logit workspaces,
-tensor-parallel gathers, and KV-cache growth. It keeps allocator and driver
-headroom and does not execute trial batches.
+tensor-parallel gathers, and KV-cache. It keeps allocator and driver
+headroom.
 
-A positive batch argument remains an upper bound, so existing commands can request
-smaller batches. Compound workloads are sized as one effective batch: context
-generation includes samples per context, and cross-entropy factors one capacity
-between its evaluation and alpha dimensions.
-
-On CPU, automatic mode deliberately uses one item; pass a positive value to opt
-into a larger host batch.
+Given batch argument remains an upper bound, so existing commands can request
+smaller batches. Actor with several batch sizes are sized as one effective batch: context
+generation includes samples per context, and cross-entropy factors one evaluation batch size and one alpha batch size.
 
 ## Model parallelism
 
