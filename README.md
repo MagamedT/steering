@@ -277,8 +277,7 @@ save_figure(figure, "concept_probs.png")
 GPU batch fields default to `0` (automatic). After all models for an actor
 are loaded, `utils.batch_size` computes a critical size from free VRAM,
 model dimensions, dtype, sequence length, attention/sampling/logit workspaces,
-tensor-parallel gathers, and KV-cache. It keeps allocator and driver
-headroom.
+tensor-parallel gathers, and KV-cache.
 
 Given batch argument remains an upper bound, so existing commands can request
 smaller batches. Actor with several batch sizes are sized as one effective batch: context
