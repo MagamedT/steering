@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size, factor_batch_size
 from utils.data import iter_eval_blocks_from_parquet
 from utils.modeling import find_block_list, load_steering_vector
 from utils.naming import model_slug
@@ -30,13 +31,13 @@ class CrossEntropyPlotConfig:
     alpha_start: float = -100.0
     alpha_end: float = 100.0
     alpha_steps: int = 128
-    alpha_batch_size: int = 16  # number of α values per forward
+    alpha_batch_size: int = 0  # 0 chooses a factor of the critical effective batch
 
     # evaluation tokenization / batching
     eval_seq_len: int = 128        # input length T; we score T next-token predictions using chunks of length T+1
     eval_stride: int = 128         # stride when chunking within a document
     eval_max_blocks: int = 8192     # how many (T+1)-token chunks to score
-    eval_batch_size: int = 16       # how many chunks per forward (before α replication)
+    eval_batch_size: int = 0        # 0 chooses the other critical-batch factor
     # eval_seq_len * eval_max_blocks next-token prediction will be evaluated
 
     text_field: str = "text"
@@ -104,7 +105,6 @@ class CrossEntropyActor(Actor):
         if not (alphas == 0.0).any():
             alphas = torch.sort(torch.cat([alphas, torch.tensor([0.0], dtype=alphas.dtype)]))[0]
         alpha_amount = int(alphas.numel())
-        alpha_batch_size = int(cfg.alpha_batch_size)
 
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
         if self.is_leader:
@@ -114,6 +114,30 @@ class CrossEntropyActor(Actor):
         forward_counter = 0
         progress_mod = max(1, int(cfg.progress_every))
         eval_seq_len = int(cfg.eval_seq_len)
+        requested_product = (
+            int(cfg.alpha_batch_size) * int(cfg.eval_batch_size)
+            if cfg.alpha_batch_size > 0 and cfg.eval_batch_size > 0
+            else 0
+        )
+        estimate = critical_batch_size(
+            model,
+            kind="cross_entropy",
+            prompt_tokens=eval_seq_len,
+            limit=alpha_amount * int(cfg.eval_max_blocks),
+            requested=requested_product,
+            dtype=cfg.dtype,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        )
+        first_limit = int(cfg.alpha_batch_size) or alpha_amount
+        second_limit = int(cfg.eval_batch_size) or int(cfg.eval_max_blocks)
+        cfg.alpha_batch_size, cfg.eval_batch_size = factor_batch_size(
+            estimate.batch_size,
+            first_limit=min(first_limit, alpha_amount),
+            second_limit=min(second_limit, int(cfg.eval_max_blocks)),
+            first_hint=int(cfg.alpha_batch_size) or 16,
+            second_hint=int(cfg.eval_batch_size) or 16,
+        )
+        alpha_batch_size = int(cfg.alpha_batch_size)
 
         # Pre-load all steering vectors once (so we can scan the parquet once).
         block_idx_to_steer = [int(i) for i in block_idx_to_steer]
@@ -204,6 +228,7 @@ class CrossEntropyActor(Actor):
                     handle.remove()
                     nll_per_alpha[int(block_idx)][alpha_0:alpha_1] += nll
 
+                    del logits, loss, nll
                     forward_counter += 1
                     if (forward_counter % progress_mod) == 0:
                         await asyncio.sleep(0)

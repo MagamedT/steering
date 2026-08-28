@@ -487,6 +487,17 @@ def rubric_completion_scores(
             true_token_ids.extend(parsed.token_pair.true_id for parsed in parsed_rows)
             false_token_ids.extend(parsed.token_pair.false_id for parsed in parsed_rows)
             verdict_positions.extend(parsed.verdict_position for parsed in parsed_rows)
+            # Release the scoring phase before the next generation peak.
+            del (
+                input_ids,
+                attention_mask,
+                generated,
+                scoring_ids,
+                scoring_mask,
+                outputs,
+                logits,
+                final_logits,
+            )
 
     details = RubricJudgeDetails(
         scores=torch.cat(all_scores).to(torch.float32),

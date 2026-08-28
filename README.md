@@ -272,6 +272,22 @@ figure, axis = plot_concept_probs("layer_0_concept_probs.npz")
 save_figure(figure, "concept_probs.png")
 ```
 
+## Automatic batch sizing
+
+GPU-facing batch fields default to `0` (automatic). After all models for an actor
+are loaded, `utils.batch_size` computes a critical size from live free VRAM,
+model dimensions, dtype, sequence length, attention/sampling/logit workspaces,
+tensor-parallel gathers, and KV-cache growth. It keeps allocator and driver
+headroom and does not execute trial batches.
+
+A positive batch argument remains an upper bound, so existing commands can request
+smaller batches. Compound workloads are sized as one effective batch: context
+generation includes samples per context, and cross-entropy factors one capacity
+between its evaluation and alpha dimensions.
+
+On CPU, automatic mode deliberately uses one item; pass a positive value to opt
+into a larger host batch.
+
 ## Model parallelism
 
 Large models can be split across several GPUs. The same commands also handle models that fit on one GPU.

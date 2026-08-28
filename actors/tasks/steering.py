@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size
 from utils.batching import chunked
 from utils.data import read_jsonl_texts
 from utils.modeling import find_block_list
@@ -19,7 +20,7 @@ from utils.runtime.actor import DistributedActorMixin
 @dataclass
 class SteeringConfig:
     """Settings for steering-vector extraction."""
-    batch_size: int = 50
+    batch_size: int = 0  # 0 chooses the computed critical size
     max_length: int = 300
     dtype: str = "float32"
     seed: int = 42
@@ -107,10 +108,17 @@ class DistributedSteeringActor(DistributedActorMixin, Actor):
                     "error": f"Empty/missing JSONLs for slug {concept_slug!r} in {prompt_root}",
                 }
             return None
-        if len(positive_texts) % cfg.batch_size != 0:
-            raise ValueError("batch_size must evenly divide positive prompts")
-        if len(negative_texts) % cfg.batch_size != 0:
-            raise ValueError("batch_size must evenly divide negative prompts")
+        estimate = critical_batch_size(
+            model,
+            kind="hidden",
+            prompt_tokens=int(cfg.max_length),
+            limit=max(len(positive_texts), len(negative_texts)),
+            requested=int(cfg.batch_size),
+            dtype=cfg.dtype,
+            use_cache=True,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        )
+        cfg.batch_size = estimate.batch_size
 
         mean_related: dict[int, torch.Tensor] = {}
         mean_unrelated: dict[int, torch.Tensor] = {}
@@ -139,14 +147,14 @@ class DistributedSteeringActor(DistributedActorMixin, Actor):
                             f"Expected replicated hidden width {hidden_size}, got {activation.shape[-1]}"
                         )
                     if current_mask is None:
-                        activation_mean = activation.mean(dim=(0, 1))
+                        per_sample = activation.mean(dim=1)
                     else:
                         masked = activation * current_mask.unsqueeze(-1).to(activation.dtype)
-                        activation_mean = (
+                        per_sample = (
                             masked.sum(dim=1) / current_token_count.unsqueeze(-1)
-                        ).mean(dim=0)
+                        )
                     target = related_batch if phase == "related" else unrelated_batch
-                    target[block_index] += activation_mean.to(torch.float32).cpu()
+                    target[block_index] += per_sample.sum(dim=0).to(torch.float32).cpu()
 
                 return hook
 
@@ -197,8 +205,8 @@ class DistributedSteeringActor(DistributedActorMixin, Actor):
 
             if self.is_leader:
                 for index in batch_indices:
-                    mean_related[index] = related_batch[index] / related_steps
-                    mean_unrelated[index] = unrelated_batch[index] / unrelated_steps
+                    mean_related[index] = related_batch[index] / len(positive_texts)
+                    mean_unrelated[index] = unrelated_batch[index] / len(negative_texts)
 
         if not self.is_leader:
             return None

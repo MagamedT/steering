@@ -9,6 +9,7 @@ import torch
 from dataclasses import dataclass
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size
 from utils.naming import slugify
 
 
@@ -30,7 +31,7 @@ class GenConfig:
 
     n_related: int = 500
     n_unrelated: int = 500
-    batch_size: int = 100
+    batch_size: int = 0  # 0 chooses the computed critical size
     max_new_tokens: int = 300
     temperature: float = 0.9
     top_k: int = 50
@@ -55,11 +56,6 @@ class LLMActor(Actor):
         cfg_dict = dict(cfg_dict or {})
 
         cfg = GenConfig(**cfg_dict)
-
-        if mode in ("both", "related"):
-            assert cfg.n_related % cfg.batch_size == 0, "n_related must be divisible by batch_size"
-        if mode in ("both", "unrelated"):
-            assert cfg.n_unrelated % cfg.batch_size == 0, "n_unrelated must be divisible by batch_size"
 
         # per-GPU deterministic seed
         seed = cfg.seed + int(rank_hint)
@@ -179,6 +175,25 @@ Structure the response as: one-sentence definition then several first-person exa
             pad_id = self.tok.eos_token_id
         if pad_id is None:
             pad_id = bos
+        active_counts = []
+        prompt_lengths = []
+        if mode in ("both", "related"):
+            active_counts.append(int(cfg.n_related))
+            prompt_lengths.append(pos_prompt_len)
+        if mode in ("both", "unrelated"):
+            active_counts.append(int(cfg.n_unrelated))
+            prompt_lengths.append(neg_prompt_len if cfg.contrastive else 1)
+        estimate = critical_batch_size(
+            self.model,
+            kind="generate",
+            prompt_tokens=max(prompt_lengths),
+            new_tokens=int(cfg.max_new_tokens),
+            limit=max(active_counts),
+            requested=int(cfg.batch_size),
+            dtype=self.compute_dtype,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        )
+        cfg.batch_size = estimate.batch_size
 
         gen_kwargs = dict(
             max_new_tokens=cfg.max_new_tokens,

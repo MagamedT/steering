@@ -12,6 +12,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size
 from utils.data import load_contexts_for_concept
 from utils.modeling import find_block_list, load_steering_vector
 from utils.naming import model_slug
@@ -45,7 +46,7 @@ class TokenPlotConfig:
     """Settings for next-token probability curves."""
     dtype: str = "float32"
     seed: int = 42
-    batch_size: int = 256
+    batch_size: int = 0  # 0 chooses the computed critical size
     alpha_start: float = -200
     alpha_end: float = 200
     alpha_steps: int = 1_024
@@ -127,7 +128,6 @@ class TokenActor(Actor):
         if (alphas == 0.0).any() == False:
             alphas = torch.sort(torch.cat([alphas, torch.tensor([0.0])]))[0]
         alpha_amount = alphas.numel()
-        batch_size = alpha_amount if cfg.batch_size == 0 else cfg.batch_size
         # Save root
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
         if self.is_leader:
@@ -136,6 +136,7 @@ class TokenActor(Actor):
         # Main loops: layers × contexts
         steer_dir_path = Path(steer_dir)
         progress_mod = max(1, int(cfg.progress_every))
+        batch_sizes_by_tokens: dict[int, int] = {}
 
         for block_idx in block_idx_to_steer:
             # Load steering vector for this (model, concept, layer)
@@ -150,6 +151,18 @@ class TokenActor(Actor):
                 input_ids = enc["input_ids"]           # [1, T]
                 attn_mask = enc["attention_mask"]      # [1, T]
                 token_amount = int(input_ids.shape[1])
+                if token_amount not in batch_sizes_by_tokens:
+                    batch_sizes_by_tokens[token_amount] = critical_batch_size(
+                        model,
+                        kind="forward",
+                        prompt_tokens=token_amount,
+                        limit=int(alpha_amount),
+                        requested=int(cfg.batch_size),
+                        dtype=cfg.dtype,
+                        use_cache=True,
+                        tp_mesh=getattr(self, "tp_mesh", None),
+                    ).batch_size
+                batch_size = batch_sizes_by_tokens[token_amount]
 
                 # Keep a maximum-sized input batch on device and slice it per α batch.
                 # The same context is evaluated at every steering strength.

@@ -8,6 +8,8 @@ from pathlib import Path
 
 import numpy as np
 from monarch.actor import Actor, endpoint
+from utils.batch_size import critical_batch_size
+
 
 from .concept_probs_continuous import ConceptProbsConfig
 from .rubric_judge import RubricJudgeDetails, rubric_completion_scores
@@ -52,6 +54,16 @@ class RescoreActor(Actor):
         texts = np.asarray(payload["completion_texts_by_ctx"], dtype=object)
         if texts.ndim != 3 or texts.shape[-1] == 0:
             raise ValueError("Saved completion texts must have shape [context, alpha, sample]")
+        cfg.judge_batch_size = critical_batch_size(
+            self.model,
+            kind="rubric",
+            prompt_tokens=int(cfg.judge_max_prompt_length),
+            new_tokens=int(cfg.judge_rubric_max_new_tokens),
+            limit=int(texts.shape[-1]),
+            requested=int(cfg.judge_batch_size),
+            dtype=cfg.judge_dtype,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        ).batch_size
 
         # Match the original run's one-context, one-alpha judge batches. Different
         # padding widths can otherwise cause small bfloat16 score changes.

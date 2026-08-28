@@ -13,6 +13,7 @@ import torch
 import numpy as np
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size
 from utils.mmlu import disable_tqdm, extract_choice, resolve_tasks, task_scores_to_dict
 from utils.modeling import find_block_list, load_steering_vector
 from utils.naming import model_slug
@@ -46,7 +47,7 @@ class MMLUEvalConfig:
     apply_last_token_only: bool = False
     max_new_tokens: int = 8
     temperature: float = 0.0
-    batch_size: int = 64
+    batch_size: int = 0  # 0 chooses the computed critical size
     use_chat_template: bool = True
     progress_every: int = 1  # yield every N alpha values
 
@@ -77,7 +78,6 @@ class MMLUActor(Actor):
         """Evaluate selected layers and steering strengths on MMLU."""
         cfg = MMLUEvalConfig(**(cfg_dict or {}))
         cfg.n_shots = int(min(max(cfg.n_shots, 0), 5))
-        cfg.batch_size = int(max(cfg.batch_size, 1))
 
         torch.manual_seed(cfg.seed + int(rank_hint))
         if torch.cuda.is_available():
@@ -99,6 +99,36 @@ class MMLUActor(Actor):
         tokenizer, model = self.tokenizer, self.model
         model.eval()
         device = getattr(self, "device", next(model.parameters()).device)
+        tasks = resolve_tasks(cfg.tasks, MMLUTask)
+        benchmark_options = {
+            "tasks": tasks,
+            "n_shots": int(cfg.n_shots),
+        }
+        if cfg.max_problems_per_task is not None:
+            benchmark_options["n_problems_per_task"] = int(
+                cfg.max_problems_per_task
+            )
+        requested_batch_size = int(cfg.batch_size)
+        if requested_batch_size < 0:
+            raise ValueError("MMLU batch size cannot be negative")
+        text_config = getattr(model.config, "text_config", model.config)
+        context_limit = next(
+            (
+                int(value)
+                for name in ("max_position_embeddings", "n_positions", "n_ctx")
+                if isinstance((value := getattr(text_config, name, None)), int)
+                and value > 0
+            ),
+            None,
+        )
+        # DeepEval 4.1.5 (still present in 4.2.0) validates batch results with
+        # `len(predictions) is not len(goldens)`. CPython reuses integer objects
+        # only for small values, so a correct outer batch above 256 can be rejected.
+        # Preserve the legacy outer chunk of 64; `_generate_letters` independently
+        # applies the analytically computed CUDA-safe sub-batch after tokenization.
+        benchmark_batch_size = min(requested_batch_size or 64, 64)
+        batch_sizes_by_shape: dict[tuple[int, int], int] = {}
+        actor_tp_mesh = getattr(self, "tp_mesh", None)
 
         blocks = find_block_list(model, override_path=layer_path)
         n_blocks = len(blocks)
@@ -122,7 +152,6 @@ class MMLUActor(Actor):
             alphas = torch.sort(torch.cat([alphas, torch.tensor([0.0], dtype=alphas.dtype)]))[0]
         alpha_list = [float(a.item()) for a in alphas]
 
-        tasks = resolve_tasks(cfg.tasks, MMLUTask)
         # DeepEval prints task_scores with lowercase task ids (example in docs),
         # so prefer Enum.value when available.
         task_ids = [str(getattr(t, "value", t.name)).strip() for t in tasks]
@@ -214,44 +243,74 @@ class MMLUActor(Actor):
 
             def _generate_letters(self, prompts: list[str]) -> list[str]:
                 """Generate one multiple-choice letter for each prompt."""
-                prompts = [self._maybe_chat_wrap(p) for p in prompts]
+                prompts = [self._maybe_chat_wrap(prompt) for prompt in prompts]
+                if not prompts:
+                    return []
+                token_rows = self._tokenizer(
+                    prompts,
+                    padding=False,
+                    truncation=False,
+                    return_attention_mask=False,
+                )["input_ids"]
+                prompt_tokens = max(len(row) for row in token_rows)
+                total_tokens = prompt_tokens + self._max_new_tokens
+                if context_limit is not None and total_tokens > context_limit:
+                    raise ValueError(
+                        f"MMLU prompt needs {total_tokens} tokens but the model "
+                        f"context limit is {context_limit}."
+                    )
 
-                old_side = getattr(self._tokenizer, "padding_side", "right")
-                self._tokenizer.padding_side = "left"
-                try:
-                    inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(self._device)
-                finally:
-                    self._tokenizer.padding_side = old_side
+                shape = (prompt_tokens, len(prompts))
+                if shape not in batch_sizes_by_shape:
+                    batch_sizes_by_shape[shape] = critical_batch_size(
+                        self._model,
+                        kind="generate",
+                        prompt_tokens=prompt_tokens,
+                        new_tokens=self._max_new_tokens,
+                        limit=len(prompts),
+                        requested=requested_batch_size,
+                        dtype=cfg.dtype,
+                        tp_mesh=actor_tp_mesh,
+                    ).batch_size
+                batch_size = batch_sizes_by_shape[shape]
 
                 pad_id = self._tokenizer.pad_token_id
                 if pad_id is None:
                     pad_id = self._tokenizer.eos_token_id
-
-                gen_kwargs = dict(
-                    max_new_tokens=self._max_new_tokens,
-                    do_sample=self._temperature > 0,
-                    pad_token_id=pad_id,
-                    eos_token_id=self._tokenizer.eos_token_id,
-                )
+                gen_kwargs = {
+                    "max_new_tokens": self._max_new_tokens,
+                    "do_sample": self._temperature > 0,
+                    "pad_token_id": pad_id,
+                    "eos_token_id": self._tokenizer.eos_token_id,
+                }
                 if self._temperature > 0:
                     gen_kwargs["temperature"] = self._temperature
 
-                # IMPORTANT: slice generated tokens after the (padded) prompt length
-                prompt_len = inputs["input_ids"].shape[1]
-
-                handle = self._block.register_forward_hook(self._make_hook())
-                try:
-                    with torch.inference_mode():
-                        out_ids = self._model.generate(**inputs, **gen_kwargs)
-                finally:
-                    handle.remove()
-
                 letters: list[str] = []
-                for i in range(out_ids.shape[0]):
-                    gen_part = out_ids[i, prompt_len:]
-                    cont = self._tokenizer.decode(gen_part, skip_special_tokens=True)
-                    choice = extract_choice(cont) or "A"
-                    letters.append(choice)
+                for start in range(0, len(prompts), batch_size):
+                    prompt_batch = prompts[start : start + batch_size]
+                    old_side = getattr(self._tokenizer, "padding_side", "right")
+                    self._tokenizer.padding_side = "left"
+                    try:
+                        inputs = self._tokenizer(
+                            prompt_batch, return_tensors="pt", padding=True
+                        ).to(self._device)
+                    finally:
+                        self._tokenizer.padding_side = old_side
+
+                    prompt_len = inputs["input_ids"].shape[1]
+                    handle = self._block.register_forward_hook(self._make_hook())
+                    try:
+                        with torch.inference_mode():
+                            out_ids = self._model.generate(**inputs, **gen_kwargs)
+                    finally:
+                        handle.remove()
+
+                    for row in out_ids:
+                        continuation = self._tokenizer.decode(
+                            row[prompt_len:], skip_special_tokens=True
+                        )
+                        letters.append(extract_choice(continuation) or "A")
                 return letters
 
             # DeepEval calls these
@@ -296,20 +355,12 @@ class MMLUActor(Actor):
 
                 def run_eval():
                     # DeepEval internally drives prompt generation; wrapper injects steering via hook.
-                    benchmark_options = {
-                        "tasks": tasks,
-                        "n_shots": int(cfg.n_shots),
-                    }
-                    if cfg.max_problems_per_task is not None:
-                        benchmark_options["n_problems_per_task"] = int(
-                            cfg.max_problems_per_task
-                        )
                     benchmark = MMLU(**benchmark_options)
 
                     # Newer DeepEval: evaluate() returns score; older: sets .overall_score
                     # Suppress noisy internal printing.
                     with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                        eval_res = benchmark.evaluate(model=wrapped, batch_size=int(cfg.batch_size))
+                        eval_res = benchmark.evaluate(model=wrapped, batch_size=benchmark_batch_size)
 
                     overall: Optional[float] = None
 
@@ -383,7 +434,15 @@ class MMLUActor(Actor):
                 "apply_last_token_only": bool(cfg.apply_last_token_only),
                 "max_new_tokens": int(cfg.max_new_tokens),
                 "temperature": float(cfg.temperature),
-                "batch_size": int(cfg.batch_size),
+                "batch_size": min(
+                    batch_sizes_by_shape.values(),
+                    default=requested_batch_size or 1,
+                ),
+                "max_prompt_tokens": max(
+                    (shape[0] for shape in batch_sizes_by_shape),
+                    default=0,
+                ),
+                "context_limit": context_limit,
                 "use_chat_template": bool(cfg.use_chat_template),
                 "dtype": cfg.dtype,
                 "errors": errors,

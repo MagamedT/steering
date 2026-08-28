@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size
 from utils.batching import chunked
 from utils.data import read_jsonl_texts
 from utils.naming import model_slug
@@ -20,7 +21,7 @@ class LogOddsConfig:
     """Settings for token log-odds."""
     dtype: str = "float32"
     seed: int = 42
-    batch_size: int = 100
+    batch_size: int = 0  # 0 chooses the computed critical size
     max_length: int = 100
     top_k: int = -1
     progress_every: int = 10  # yield every N batches
@@ -69,6 +70,16 @@ class LogOddsActor(Actor):
         if missing:
             result = {"error": f"Missing or empty prompt files for '{concept_slug}': {', '.join(missing)}"}
             return result if self.is_leader else None
+        cfg.batch_size = critical_batch_size(
+            model,
+            kind="forward",
+            prompt_tokens=int(cfg.max_length),
+            limit=max(len(concept_prompts), len(negative_prompts)),
+            requested=int(cfg.batch_size),
+            dtype=cfg.dtype,
+            use_cache=True,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        ).batch_size
 
         device = getattr(self, "device", next(model.parameters()).device)
         save_root = Path(save_dir) / model_slug(model_name) / concept_slug
@@ -106,6 +117,9 @@ class LogOddsActor(Actor):
                 sum_log_probs += log_probs.sum(dim=0)
                 total += log_probs.shape[0]
 
+                # Do not retain a full-vocabulary batch while the next model
+                # forward is being allocated.
+                del logits, last_logits, log_probs, input_ids, attn_mask
                 if step % progress_mod == 0:
                     await asyncio.sleep(0)
             return sum_log_probs, total

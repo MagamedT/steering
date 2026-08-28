@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from monarch.actor import Actor, endpoint
 
+from utils.batch_size import critical_batch_size
 from utils.batching import chunked_with_bounds
 from utils.data import count_negative_prompts, load_contexts_for_concept
 from utils.modeling import (
@@ -45,7 +46,7 @@ class ConceptProbsConfig:
 
     # generator sampling
     n_samples_per_context: int = 12
-    gen_context_batch_size: int = 12  # number of distinct contexts per generate() call
+    gen_context_batch_size: int = 0  # 0 chooses the computed critical size
 
     max_prompt_length: int = 512
     max_new_tokens: int = 100
@@ -386,6 +387,33 @@ class ConceptProbsActor(Actor):
         if not contexts:
             result = {"error": f"No contexts in {contexts_file} for concept '{concept_slug}'"}
             return result if self.is_leader else None
+        generator_estimate = critical_batch_size(
+            gen_model,
+            kind="generate",
+            prompt_tokens=int(cfg.max_prompt_length),
+            new_tokens=int(cfg.max_new_tokens),
+            multiplier=int(cfg.n_samples_per_context),
+            limit=len(contexts),
+            requested=int(cfg.gen_context_batch_size),
+            dtype=cfg.generator_dtype,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        )
+        judge_model = self._judge_model
+        assert judge_model is not None
+        judge_estimate = critical_batch_size(
+            judge_model,
+            kind="generate",
+            prompt_tokens=int(cfg.judge_max_prompt_length),
+            new_tokens=4,
+            limit=len(contexts),
+            requested=int(cfg.gen_context_batch_size),
+            dtype=cfg.judge_dtype,
+            tp_mesh=getattr(self, "tp_mesh", None),
+        )
+        cfg.gen_context_batch_size = min(
+            generator_estimate.batch_size,
+            judge_estimate.batch_size,
+        )
 
         n_neg = count_negative_prompts(contexts_file)
         if n_neg is None:

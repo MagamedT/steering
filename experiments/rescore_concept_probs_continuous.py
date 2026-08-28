@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--input_dir", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--judge_model", required=True)
-    parser.add_argument("--judge_batch_size", type=int, default=8)
+    parser.add_argument("--judge_batch_size", type=int, default=ConceptProbsConfig.judge_batch_size)
     parser.add_argument("--judge_max_new_tokens", type=int, default=256)
     add_distributed_args(parser)
     return parser.parse_args()

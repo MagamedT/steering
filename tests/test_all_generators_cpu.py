@@ -415,7 +415,12 @@ def fake_deepeval():
 
         def evaluate(self, model, batch_size):
             """Generate one answer and expose fixed benchmark scores."""
-            model.generate("A B C D")
+            if batch_size > 64:
+                raise RuntimeError("DeepEval outer MMLU batch must remain bounded")
+
+            predictions = model.batch_generate(["A B C D", "A B C D A"])
+            if len(predictions) != 2:
+                raise RuntimeError("Fake MMLU batch generation lost predictions")
             self.overall_score = 1.0
             self.task_scores = {task.value: 1.0 for task in self.tasks}
             return 1.0
@@ -686,7 +691,15 @@ class AllGeneratorsCpuTest(unittest.IsolatedAsyncioTestCase):
                         tasks=["HIGH_SCHOOL_COMPUTER_SCIENCE"], layers=1,
                         layer_path=None, seed=0, dim="gpu", max_gpus=1,
                     ))
-                self.assertTrue(any(mmlu_out.rglob("*.json")))
+                mmlu_path = next(mmlu_out.rglob("*.json"), None)
+                self.assertIsNotNone(mmlu_path)
+                with open(mmlu_path, encoding="utf-8") as handle:
+                    mmlu_payload = json.load(handle)
+                self.assertEqual(mmlu_payload["batch_size"], 1)
+                self.assertEqual(mmlu_payload["overall_scores"], [1.0])
+                self.assertEqual(mmlu_payload["errors"], [None])
+                self.assertGreater(mmlu_payload["max_prompt_tokens"], 0)
+                self.assertEqual(mmlu_payload["context_limit"], 64)
 
             download_out = root / "download"
             remote_file = "sample-10BT/train/part.parquet"
